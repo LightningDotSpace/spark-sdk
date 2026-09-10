@@ -293,8 +293,8 @@ fn check_doc_snippets_kotlin_multiplatform_cmd(skip_binding_gen: bool) -> Result
 
         // Publish metadata + JVM + Android variants; iOS is excluded by
         // `-PskipIosTargets` so this stays off the Konan + cinterop +
-        // iOS native compile path. SDK iOS compile coverage is provided
-        // by the cli-ci `kotlin-multiplatform-ios` job.
+        // iOS native compile path. This fork does not run a separate CI
+        // job that compiles the iOS target.
         let kotlin_multiplatform_dir = bindings_dir.join("langs/kotlin-multiplatform");
         let status = Command::new("./gradlew")
             .arg("publishToMavenLocal")

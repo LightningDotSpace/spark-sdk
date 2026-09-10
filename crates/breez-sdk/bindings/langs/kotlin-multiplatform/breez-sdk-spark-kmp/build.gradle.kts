@@ -6,11 +6,10 @@ plugins {
 
 apply(plugin = "kotlinx-atomicfu")
 
-// Skip Apple Kotlin/Native targets (iOS + macOS) when explicitly requested.
-// Used by the docs-snippets CI job, which only needs the JVM publication, and
-// by the Android AAR smoke-test which runs on Ubuntu without a Konan macOS
-// toolchain. The cli-ci `kotlin-multiplatform-ios`, `kotlin-multiplatform-macos`
-// jobs and the release pipeline still build every Apple target.
+// Skip Apple Kotlin/Native targets (iOS + macOS) when explicitly requested:
+// for a JVM-only publication, or for an Android AAR build on a host without a
+// Konan macOS toolchain. This fork does not run a CI job that builds every
+// Apple target; do that locally (without this flag) when needed.
 val skipIosTargets = project.hasProperty("skipIosTargets")
 
 kotlin {

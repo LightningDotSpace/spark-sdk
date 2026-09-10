@@ -12,8 +12,7 @@ import breez_sdk_spark
 
 ## Python Package
 
-Run the GitHub workflow 'Publish Python Bindings' when creating a new release of Breez Spark SDK.
-It will create wheels for the following Python versions and Platforms and upload them to [PyPi.org](https://pypi.org/project/breez-sdk-spark/).
+Upstream `breez/spark-sdk` publishes wheels for the versions/platforms below to [PyPi.org](https://pypi.org/project/breez-sdk-spark/) via a 'Publish Python Bindings' GitHub workflow. This DFX fork does not run that workflow (removed along with the other inherited language-binding/publish CI); build and publish wheels manually if needed.
 
 ### Supported Wheels
 

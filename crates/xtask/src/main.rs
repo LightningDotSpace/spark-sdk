@@ -187,7 +187,8 @@ enum Commands {
     /// plus the ObjC PRF helper) in the Swift binding. Pub/npm packaging
     /// strips cross-repo paths, so Flutter and RN consume committed copies
     /// instead of a gradle srcDirs / SPM path share. Run this after editing
-    /// a canonical file; CI runs it with `--check` and fails on drift.
+    /// a canonical file; run with `--check` to verify copies (this DFX
+    /// fork does not run that check in CI).
     SyncPasskeyCore {
         /// Verify the copies are up to date without writing. Exit
         /// non-zero if any copy differs from the canonical source.
