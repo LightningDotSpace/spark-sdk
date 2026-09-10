@@ -196,9 +196,9 @@ The committed tree always has every edit applied, so fresh clones build without 
 
 ## CLI Modification Policy
 
-**Do not modify language-specific CLIs** (`crates/breez-sdk/bindings/examples/cli/langs/`) unless explicitly requested by the user (e.g. porting a new feature for testing). (The upstream exception for CI-matrix/Flutter build-failure fixes no longer applies here — this fork doesn't run those CI jobs.)
+**Do not modify language-specific CLIs** (`crates/breez-sdk/bindings/examples/cli/langs/`) unless explicitly requested by the user (e.g. porting a new feature for testing). (The upstream exception for CI-matrix/Flutter build-failure fixes no longer applies here: this fork doesn't run those CI jobs.)
 
-This DFX fork does not run the upstream **Sync CLI Languages** GitHub Actions workflow (`sync-cli.yml`) — it was removed along with the other inherited language-binding/publish CI, so Rust CLI changes are no longer auto-propagated to language CLIs. Port changes manually if needed; unnecessary modifications to language CLIs still create PR noise.
+This DFX fork does not run the upstream **Sync CLI Languages** GitHub Actions workflow (`sync-cli.yml`): it was removed along with the other inherited language-binding/publish CI, so Rust CLI changes are no longer auto-propagated to language CLIs. Port changes manually if needed; unnecessary modifications to language CLIs still create PR noise.
 
 The **Rust CLI** (`crates/breez-sdk/cli/`) remains the source of truth for the ported language CLIs.
 

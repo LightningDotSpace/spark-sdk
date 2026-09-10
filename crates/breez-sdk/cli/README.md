@@ -71,7 +71,7 @@ Each command supports `--help` for detailed usage, e.g. `receive --help`.
 
 ## Language Ports
 
-This Rust CLI is the source of truth. Automated ports are maintained in [`bindings/examples/cli/`](../bindings/examples/cli/):
+This Rust CLI is the source of truth. Ports are maintained in [`bindings/examples/cli/`](../bindings/examples/cli/):
 
 | Language | Path |
 |----------|------|

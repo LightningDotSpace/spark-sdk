@@ -2,7 +2,7 @@
 
 Interactive CLI client for the [Breez SDK](../../../../../../../README.md) with Spark, written in Dart.
 
-> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is a port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first. This DFX fork does not run the upstream sync-CLI automation that used to propagate those changes automatically — port them here by hand.
+> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is a port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first. This DFX fork does not run the upstream sync-CLI automation that used to propagate those changes automatically. Port them here by hand.
 
 This CLI uses the [breez_sdk_spark_flutter](../../../../../../../packages/flutter) package (Flutter/Dart bindings via `flutter_rust_bridge`).
 

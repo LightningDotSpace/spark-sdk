@@ -5,10 +5,12 @@
 //! stays sats-denominated and fundable for future runs. This doubles as a real
 //! test of the send-all token→sats conversion path.
 //!
-//! Run **last** in CI (as an `if: always()` step) so funds are recovered even
-//! when the conversion tests fail. Because Bob is deterministic, funds left by a
-//! crashed run are recovered by the next teardown. Skips automatically (logging a
-//! warning, returning `Ok`) unless the credentials below are set.
+//! Upstream `breez/spark-sdk` runs this **last** in CI (as an `if: always()`
+//! step) so funds are recovered even when the conversion tests fail. This DFX
+//! fork does not run that job; run it manually last for the same reason.
+//! Because Bob is deterministic, funds left by a crashed run are recovered by
+//! the next teardown. Skips automatically (logging a warning, returning
+//! `Ok`) unless the credentials below are set.
 //!
 //! # Required environment variables
 //! - `MAINNET_TEST_MNEMONIC` — mnemonic of the test account. Also the primary gate.

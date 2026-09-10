@@ -10,10 +10,10 @@ Current runners:
 
 | Runner | Drives | Entry point | CI home |
 |---|---|---|---|
-| Rust | `crates/breez-sdk/cli` binary | `crates/breez-sdk/cli/tests/scenarios.rs` (`make cli-itest`) | local only — this DFX fork does not run the upstream CI |
-| JS/WASM | `bindings/examples/cli/langs/wasm` port (consumes the locally built `packages/wasm` npm package) | `packages/wasm/itest/scenarios.test.js` (`make wasm-itest`) | local only — this DFX fork does not run the upstream CI |
-| Swift | `bindings/examples/cli/langs/swift` port (local uniffi bindings) | the Rust runner with `SCENARIO_CLI` pointing at the built binary (`make swift-itest`) | local only — this DFX fork does not run the upstream CI (lnurl scenarios skip: no docker) |
-| Kotlin | `bindings/examples/cli/langs/kotlin-multiplatform` port's JVM target (shares the generated uniffi surface with Android) | the Rust runner with `SCENARIO_CLI="java -jar ..."` (`make kotlin-itest`) | local only — this DFX fork does not run the upstream CI |
+| Rust | `crates/breez-sdk/cli` binary | `crates/breez-sdk/cli/tests/scenarios.rs` (`make cli-itest`) | local only: this DFX fork does not run the upstream CI |
+| JS/WASM | `bindings/examples/cli/langs/wasm` port (consumes the locally built `packages/wasm` npm package) | `packages/wasm/itest/scenarios.test.js` (`make wasm-itest`) | local only: this DFX fork does not run the upstream CI |
+| Swift | `bindings/examples/cli/langs/swift` port (local uniffi bindings) | the Rust runner with `SCENARIO_CLI` pointing at the built binary (`make swift-itest`) | local only: this DFX fork does not run the upstream CI (lnurl scenarios skip: no docker) |
+| Kotlin | `bindings/examples/cli/langs/kotlin-multiplatform` port's JVM target (shares the generated uniffi surface with Android) | the Rust runner with `SCENARIO_CLI="java -jar ..."` (`make kotlin-itest`) | local only: this DFX fork does not run the upstream CI |
 
 The Rust runner is generic: `SCENARIO_CLI` (a command line) and `SCENARIO_CLI_CWD`
 point it at any CLI port, so most languages need no runner code at all, just a
@@ -24,7 +24,7 @@ smoke suite.
 
 - **Scenarios are data, never ported.** Adding or changing behavior means
   changing the Rust CLI and the scenario in the same PR; the rust runner
-  (`make cli-itest`) proves the new behavior locally — this DFX fork does
+  (`make cli-itest`) proves the new behavior locally: this DFX fork does
   not run that job in CI.
 - **Runners are per-language and thin.** They only know how to spawn their
   CLI, feed stdin, and evaluate the assertions below. Adding a language means

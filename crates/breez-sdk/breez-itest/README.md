@@ -82,7 +82,7 @@ cargo test -p breez-sdk-itest test_wallet_recovery_from_mnemonic -- --nocapture
 
 ### GitHub Secrets (upstream only)
 
-Upstream `breez/spark-sdk` adds the following as GitHub Actions secrets to run this in CI. This fork does not run the recovery test in CI, so this step doesn't apply here — pass the values as local env vars instead (see above).
+Upstream `breez/spark-sdk` adds the following as GitHub Actions secrets to run this in CI. This fork does not run the recovery test in CI, so this step doesn't apply here. Pass the values as local env vars instead (see above).
 
 1. `RECOVERY_TEST_MNEMONIC` - The 12-word mnemonic output by the setup test
 2. `RECOVERY_TEST_EXPECTED_PAYMENTS` - The JSON output by the setup test (single line)

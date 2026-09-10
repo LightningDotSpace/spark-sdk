@@ -2,7 +2,7 @@
 
 Command-line interface for testing and interacting with the Breez SDK (Spark) using the WASM/Node.js bindings.
 
-> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is a port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first. This DFX fork does not run the upstream sync-CLI automation that used to propagate those changes automatically — port them here by hand.
+> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is a port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first. This DFX fork does not run the upstream sync-CLI automation that used to propagate those changes automatically. Port them here by hand.
 
 ## Prerequisites
 

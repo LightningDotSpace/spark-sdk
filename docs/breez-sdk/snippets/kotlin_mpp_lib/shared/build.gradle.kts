@@ -3,8 +3,9 @@ plugins {
     alias(libs.plugins.androidLibrary)
 }
 
-// Skip iOS targets when the breez SDK was published JVM-only (used by
-// docs CI together with `-PskipIosTargets` on the SDK build).
+// Skip iOS targets when the breez SDK was published JVM-only (pair with
+// `-PskipIosTargets` on the SDK build; this DFX fork does not run a CI job
+// that does this, use it for a local JVM-only build).
 val skipIosTargets = project.hasProperty("skipIosTargets")
 
 kotlin {
