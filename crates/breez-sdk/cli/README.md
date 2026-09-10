@@ -84,7 +84,7 @@ This Rust CLI is the source of truth. Automated ports are maintained in [`bindin
 | [Swift](../bindings/examples/cli/langs/swift/) | `bindings/examples/cli/langs/swift/` |
 | [WASM/TypeScript](../bindings/examples/cli/langs/wasm/) | `bindings/examples/cli/langs/wasm/` |
 
-Changes to this CLI trigger a [sync workflow](../../../.github/workflows/sync-cli-langs.yml) that automatically opens PRs to update each language port.
+Upstream `breez/spark-sdk` propagates changes to this CLI to each language port via a `sync-cli` GitHub Actions workflow. This DFX fork does not run that workflow (removed along with the other inherited language-binding/publish CI); port changes to each language CLI manually if needed.
 
 ## Passkey
 
