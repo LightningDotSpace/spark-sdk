@@ -29,7 +29,9 @@ jobs:
       - name: Check for existing PR
         id: check-pr
         run: |
-          PR_COUNT=$(gh pr list --base main --head develop --state open --json number --jq 'length')
+          PR_COUNT=$(gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open -f base=main -f "head=${GITHUB_REPOSITORY_OWNER}:develop" \
+            --jq 'length')
           echo "pr_exists=$([[ $PR_COUNT -gt 0 ]] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
           echo "::notice::Open PRs from develop to main: $PR_COUNT"
         env:
