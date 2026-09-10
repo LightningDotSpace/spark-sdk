@@ -1,0 +1,57 @@
+name: breez-lnurl DEV CI/CD
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_TAGS: lightningdotspacecom/breez-lnurl:beta
+
+jobs:
+  validate-ref:
+    name: Validate ref
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Require exact ref (case-sensitive)
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/develop" ]; then
+            echo "::error::Ref must be exactly refs/heads/develop (got: $REF); GitHub's on.push.branches filter and if: expressions are case-insensitive"
+            exit 1
+          fi
+
+  build-and-push:
+    name: Build and push to DEV
+    needs: validate-ref
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: breez-lnurl-dev-deploy
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/develop
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/breez-sdk/lnurl/Dockerfile
+          push: true
+          tags: ${{ env.DOCKER_TAGS }}
+          platforms: linux/arm64

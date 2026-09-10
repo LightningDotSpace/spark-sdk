@@ -1,16 +1,8 @@
 ## Steps to compile the snippets locally
 
-### Building package Using CI
+### Using the published npm package
 
-1. Build a react native package
-
-- By running the `Publish` CI in the spark-sdk repository (use dummy binaries)
-
-2. Download the react-native-{VERSION} artifact
-3. Unzip the artifact and put the `breez-sdk-spark-react-native.tgz` file in the `snippets/react-native/packages` folder
-4. Run `yarn` to install the package
-
-The first few steps above can be done on the CLI with
+This DFX fork does not run the upstream `Publish` CI. Fetch the published package from npm instead:
 
 ```shell
 mkdir packages
@@ -22,6 +14,8 @@ cp package/breez-sdk-spark-react-native.tgz ../packages/
 rm -rf package
 cd ..
 ```
+
+Then run `yarn` to install the package.
 
 ### Building package locally
 

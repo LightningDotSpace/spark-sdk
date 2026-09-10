@@ -2,7 +2,7 @@
 
 Interactive CLI client for the [Breez SDK](../../../../../../../README.md) with Spark, written in Python.
 
-> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is an automated port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first — a [sync workflow](../../../../../../../.github/workflows/sync-python-cli.yml) will open a PR to update this CLI automatically.
+> **Note:** The [Rust CLI](../../../../../cli/) is the source of truth. This CLI is a port that mirrors its commands, arguments, and behavior. Changes should be made to the Rust CLI first. This DFX fork does not run the upstream sync-CLI automation that used to propagate those changes automatically. Port them here by hand.
 
 ## Prerequisites
 

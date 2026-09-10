@@ -5,7 +5,8 @@
 //! `build_backend_sdk`). The Turnkey cases only exist when this crate is built
 //! with the `turnkey` feature; they then require `TURNKEY_*` credentials and
 //! fail without them. All cases use the regtest faucet, like the rest of
-//! breez-itest, so they run in CI rather than locally.
+//! breez-itest. Upstream `breez/spark-sdk` runs them in CI; this DFX fork
+//! does not run that job, so run them locally.
 //!
 //! Coverage per backend: identity-key derivation (`info_and_address`), on-chain
 //! deposit funding / static-deposit signing (`fund_onchain_deposit`), and an
@@ -315,8 +316,8 @@ async fn token_mint(#[case] backend: SignerBackend) -> Result<()> {
 /// Deposit gating is signer-driven (not config-driven), so unlike the encryption
 /// features the flag alone doesn't produce the refusal: it needs a real
 /// deny-export signer. Requires a `TURNKEY_*` user with an `EFFECT_DENY` policy
-/// on `EXPORT_WALLET_ACCOUNT` (normal CI creds allow export, so on-chain receive
-/// would succeed), so it is `#[ignore]`.
+/// on `EXPORT_WALLET_ACCOUNT` (the regular `TURNKEY_*` creds allow export, so
+/// on-chain receive would succeed), so it is `#[ignore]`.
 #[cfg(feature = "turnkey")]
 #[test_log::test(tokio::test)]
 #[ignore = "requires a Turnkey policy denying EXPORT_WALLET_ACCOUNT; run with --ignored"]
@@ -381,8 +382,8 @@ async fn assert_update_settings_fails_under_deny_export(config: Config) -> Resul
 /// [`assert_update_settings_fails_under_deny_export`]).
 ///
 /// Requires a `TURNKEY_*` user carrying an `EFFECT_DENY` policy on
-/// `EXPORT_WALLET_ACCOUNT`, so it is `#[ignore]` by default (normal CI creds
-/// allow export). Run explicitly:
+/// `EXPORT_WALLET_ACCOUNT`, so it is `#[ignore]` by default (the regular
+/// `TURNKEY_*` creds allow export). Run explicitly:
 /// `cargo test -p breez-sdk-itest --features turnkey -- --ignored
 /// turnkey_export_denied_with_encryption_enabled_fails`.
 #[cfg(feature = "turnkey")]
