@@ -8,12 +8,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: breez-lnurl-dev
+  cancel-in-progress: true
+
 env:
   DOCKER_TAGS: lightningdotspacecom/breez-lnurl:beta
 
 jobs:
   build-and-push:
     name: Build and push to DEV
+    if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
