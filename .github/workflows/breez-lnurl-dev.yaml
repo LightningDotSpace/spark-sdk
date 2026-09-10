@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: breez-lnurl-dev
+  group: breez-lnurl-dev-${{ github.ref }}
   cancel-in-progress: true
 
 env:
