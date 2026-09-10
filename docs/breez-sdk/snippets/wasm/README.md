@@ -2,7 +2,7 @@
 
 ### Building package Using CI
 1. Build a Wasm package
-  - By running the publish-all-platforms CI in the breez-sdk-spark repository
+  - This DFX fork does not run the upstream publish-all-platforms CI; build the package locally instead
 2. Download the wasm-{VERSION} artifact 
 3. Unzip the artifact and put the `breez-sdk-spark.tgz` file in the `snippets/wasm/packages` folder
 4. Run `yarn` to install the package.
