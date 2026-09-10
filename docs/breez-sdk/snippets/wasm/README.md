@@ -1,14 +1,8 @@
 ## Steps to compile the snippets locally
 
-### Building package Using CI
-1. Build a Wasm package
-  - This DFX fork does not run the upstream publish-all-platforms CI; build the package locally instead
-2. Download the wasm-{VERSION} artifact 
-3. Unzip the artifact and put the `breez-sdk-spark.tgz` file in the `snippets/wasm/packages` folder
-4. Run `yarn` to install the package.
-5. Happy coding
+### Using the published npm package
 
-The first few steps above can be done on the CLI with
+This DFX fork does not run the upstream publish-all-platforms CI. Fetch the published package from npm instead:
 
 ```shell
 mkdir packages
@@ -20,6 +14,8 @@ cp package/breez-sdk-spark.tgz ../packages/
 rm -rf package
 cd ..
 ```
+
+Then run `yarn` to install the package.
 
 ### Building package locally
 ```shell
