@@ -8,17 +8,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: breez-lnurl-prd-${{ github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: true
-
 env:
   DOCKER_TAGS: lightningdotspacecom/breez-lnurl:latest
 
 jobs:
-  build-and-push:
-    name: Build and push to PRD
-    if: github.ref == 'refs/heads/main'
+  validate-ref:
+    name: Validate ref
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Require exact ref (case-sensitive)
@@ -26,10 +21,18 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           if [ "$REF" != "refs/heads/main" ]; then
-            echo "::error::Ref must be exactly refs/heads/main (got: $REF); the if: guard above is case-insensitive"
+            echo "::error::Ref must be exactly refs/heads/main (got: $REF); GitHub's on.push.branches filter and if: expressions are case-insensitive"
             exit 1
           fi
 
+  build-and-push:
+    name: Build and push to PRD
+    needs: validate-ref
+    runs-on: ubuntu-24.04-arm
+    concurrency:
+      group: breez-lnurl-prd-deploy
+      cancel-in-progress: true
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
 
