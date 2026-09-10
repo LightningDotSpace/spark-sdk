@@ -8,7 +8,7 @@ defined once and enforced everywhere.
 
 Current runners:
 
-| Runner | Drives | Entry point | CI home |
+| Runner | Drives | Entry point | Runs where |
 |---|---|---|---|
 | Rust | `crates/breez-sdk/cli` binary | `crates/breez-sdk/cli/tests/scenarios.rs` (`make cli-itest`) | local only: this DFX fork does not run the upstream CI |
 | JS/WASM | `bindings/examples/cli/langs/wasm` port (consumes the locally built `packages/wasm` npm package) | `packages/wasm/itest/scenarios.test.js` (`make wasm-itest`) | local only: this DFX fork does not run the upstream CI |
