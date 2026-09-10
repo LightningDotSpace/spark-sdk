@@ -21,6 +21,15 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-24.04-arm
     steps:
+      - name: Require exact ref (case-sensitive)
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/develop" ]; then
+            echo "::error::Ref must be exactly refs/heads/develop (got: $REF); the if: guard above is case-insensitive"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
