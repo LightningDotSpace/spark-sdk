@@ -59,7 +59,7 @@ jobs:
             "" \
             "### Checklist" \
             "- [ ] Review all changes" \
-            "- [ ] Verify CI passes" \
+            "- [ ] Verify local checks pass (\`make check\`)" \
             "- [ ] Approve and merge when ready for production" \
             > /tmp/pr-body.md
 
