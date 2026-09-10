@@ -25,8 +25,9 @@ writes the [llmstxt.org](https://llmstxt.org) files.
 
 ## Build output
 
-`mdbook build` writes one directory per renderer under `book/`, which the publish
-workflow flattens to the site root:
+`mdbook build` writes one directory per renderer under `book/`. This fork does
+not run a CI workflow that publishes it; flatten it to a site root manually if
+needed:
 
 | Directory | Published as | Contents |
 |---|---|---|

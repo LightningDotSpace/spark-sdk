@@ -71,7 +71,7 @@ This will output:
 ### Recovery Test
 
 The recovery test loads a wallet from mnemonic and verifies all payments match the expected spec.
-It runs automatically in CI when the environment variables are set, or skips gracefully if not.
+This fork does not run it in CI; run it manually with the environment variables set below, or it skips gracefully if not.
 
 ```bash
 # Run with credentials
@@ -80,9 +80,9 @@ RECOVERY_TEST_EXPECTED_PAYMENTS='{"min_balance_sats":50000,"payments":[...]}' \
 cargo test -p breez-sdk-itest test_wallet_recovery_from_mnemonic -- --nocapture
 ```
 
-### Setting Up GitHub Secrets
+### GitHub Secrets (upstream only)
 
-After running the setup test, add the following secrets to your GitHub repository:
+Upstream `breez/spark-sdk` adds the following as GitHub Actions secrets to run this in CI. This fork does not run the recovery test in CI, so this step doesn't apply here — pass the values as local env vars instead (see above).
 
 1. `RECOVERY_TEST_MNEMONIC` - The 12-word mnemonic output by the setup test
 2. `RECOVERY_TEST_EXPECTED_PAYMENTS` - The JSON output by the setup test (single line)
@@ -92,4 +92,4 @@ After running the setup test, add the following secrets to your GitHub repositor
 If new payment test cases need to be added, you can regenerate the test wallet by running the setup test again.
 
 1. Run the setup test again to create a new wallet
-2. Update both GitHub secrets with the new values
+2. Update both env vars (or, on upstream, GitHub secrets) with the new values

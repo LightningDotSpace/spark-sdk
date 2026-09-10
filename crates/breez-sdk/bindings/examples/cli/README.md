@@ -4,7 +4,7 @@ Example CLI clients for the [Breez SDK](../../../../../README.md) in multiple la
 
 ## Source of Truth
 
-The **[Rust CLI](../../../cli/)** (`crates/breez-sdk/cli/`) is the canonical implementation. All other language CLIs are automated ports that mirror its commands, arguments, and behavior.
+The **[Rust CLI](../../../cli/)** (`crates/breez-sdk/cli/`) is the canonical implementation. All other language CLIs are ports that mirror its commands, arguments, and behavior.
 
 Upstream `breez/spark-sdk` propagates Rust CLI changes to the language ports via a `sync-cli` GitHub Actions workflow. This DFX fork does not run that workflow (removed along with the other inherited language-binding/publish CI); port Rust CLI changes to the language CLIs manually if needed.
 

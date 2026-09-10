@@ -133,7 +133,7 @@ build-kotlin-multiplatform-bindgen-only: install-uniffi-bindgen-gobley build-ndk
 		$(TARGET_DIR)aarch64-linux-android/release/$(BIN_NAME).so
 
 # Run bindgen using the host's release library, no Android NDK build required.
-# Used by the docs-snippets check to avoid cross-compiling for Android.
+# Avoids cross-compiling for Android when building on the host (e.g. for local docs builds).
 build-kotlin-multiplatform-bindgen-host: install-uniffi-bindgen-gobley build-release
 	gobley-uniffi-bindgen --library -o $(FFI_DIR)kmp \
 		--crate-configs breez_sdk_spark_bindings=./uniffi.kotlin-multiplatform.toml \
@@ -142,8 +142,8 @@ build-kotlin-multiplatform-bindgen-host: install-uniffi-bindgen-gobley build-rel
 	cp -r $(FFI_DIR)kmp/* $(KMP_BASE)/
 
 # Build Android arm64 bindings (cross-compile + bindgen + jniLibs copy).
-# Used by the cli-ci `kotlin-multiplatform-android` job for the Android
-# Kotlin compile + AAR smoke check on PRs.
+# For the Android Kotlin compile + AAR smoke check (this fork does not run
+# that check in CI; run it manually if needed).
 build-kotlin-multiplatform-bindgen-android-arm64: install-uniffi-bindgen-gobley build-ndk-release-target-aarch64-linux-android
 	gobley-uniffi-bindgen --library -o $(FFI_DIR)kmp \
 		--crate-configs breez_sdk_spark_bindings=./uniffi.kotlin-multiplatform.toml \
