@@ -15,6 +15,7 @@ pub struct State<DB> {
     pub scheme: String,
     pub min_sendable: u64,
     pub max_sendable: u64,
+    pub pay_response_spark_address: bool,
     pub include_spark_address: bool,
     /// `None` disables the per-pubkey registration limit.
     pub registration_limit: Option<crate::repository::RegistrationLimit>,
@@ -90,6 +91,7 @@ where
             scheme: self.scheme.clone(),
             min_sendable: self.min_sendable,
             max_sendable: self.max_sendable,
+            pay_response_spark_address: self.pay_response_spark_address,
             include_spark_address: self.include_spark_address,
             registration_limit: self.registration_limit,
             domains: Arc::clone(&self.domains),

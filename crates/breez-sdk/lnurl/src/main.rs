@@ -96,6 +96,13 @@ struct Args {
     #[arg(long, default_value = "4000000000")]
     pub max_sendable: u64,
 
+    /// Include the user's Spark address (`sparkAddress`) in the LNURL-pay
+    /// response. Payers that support it can then transfer on Spark instead
+    /// of paying over Lightning, at the cost of publishing which Spark
+    /// address is behind a name. Invoices are not affected.
+    #[arg(long, default_value = "false")]
+    pub pay_response_spark_address: bool,
+
     /// Maximum successful address registrations one pubkey may perform per
     /// domain in a rolling 24h window. 0 disables the limit.
     #[arg(long, default_value = "5")]
@@ -457,6 +464,7 @@ where
         scheme: args.scheme,
         min_sendable: args.min_sendable,
         max_sendable: args.max_sendable,
+        pay_response_spark_address: args.pay_response_spark_address,
         registration_limit,
         include_spark_address: {
             #[cfg(feature = "dev")]

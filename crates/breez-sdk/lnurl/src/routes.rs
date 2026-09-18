@@ -21,6 +21,7 @@ use nostr::{Alphabet, Event, JsonUtil, Kind, TagStandard};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use spark::address::SparkAddress;
 use spark::utils::verify_signature::verify_signature_ecdsa;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -112,6 +113,12 @@ pub struct PayResponse {
     #[serde(rename = "nostrPubkey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nostr_pubkey: Option<XOnlyPublicKey>,
+
+    /// Optional, the user's Spark address. A payer that supports it can
+    /// transfer on Spark directly instead of requesting an invoice.
+    #[serde(rename = "sparkAddress")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spark_address: Option<String>,
 }
 
 pub struct LnurlServer<DB> {
@@ -598,6 +605,10 @@ where
 
         let nostr_pubkey = user_nostr_pubkey(state.nostr_keys.as_ref(), &user.pubkey)?;
         let allows_nostr = nostr_pubkey.is_some().then_some(true);
+        let spark_address = state
+            .pay_response_spark_address
+            .then(|| spark_address_for(&user.pubkey, state.spark_config.network))
+            .flatten();
         Ok(Json(PayResponse {
             callback: format!(
                 "{}://{}/lnurlp/{}/invoice",
@@ -611,6 +622,7 @@ where
             comment_allowed: Some(MAX_COMMENT_LENGTH as u32),
             allows_nostr,
             nostr_pubkey,
+            spark_address,
         }))
     }
 
@@ -1885,6 +1897,20 @@ where
         StatusCode::CONFLICT,
         Json(Value::String("signature has already been used".into())),
     ))
+}
+
+/// The Spark address of a registered pubkey, or `None` if the stored key
+/// does not encode. An unencodable key is logged and the lookup still
+/// succeeds without the field; a payer then falls back to the invoice.
+fn spark_address_for(pubkey: &str, network: spark::Network) -> Option<String> {
+    let pubkey = parse_pubkey(pubkey).ok()?;
+    match SparkAddress::new(pubkey, network, None).to_address_string() {
+        Ok(address) => Some(address),
+        Err(e) => {
+            error!("failed to encode spark address for {}: {}", pubkey, e);
+            None
+        }
+    }
 }
 
 fn parse_pubkey(pubkey: &str) -> Result<PublicKey, (StatusCode, Json<Value>)> {
@@ -3940,5 +3966,61 @@ mod tests {
                 "{lnurl} should not address alice@example.com"
             );
         }
+    }
+
+    // The secp256k1 generator point, compressed: a valid key that belongs to nobody.
+    const SPARK_ADDRESS_TEST_PUBKEY: &str =
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    #[test]
+    fn spark_address_for_encodes_the_registered_pubkey() {
+        let address = spark_address_for(SPARK_ADDRESS_TEST_PUBKEY, spark::Network::Mainnet)
+            .expect("a valid pubkey encodes");
+        assert!(address.starts_with("spark1"), "{address}");
+
+        let decoded = SparkAddress::from_str(&address).expect("the address parses back");
+        assert_eq!(
+            decoded.identity_public_key.to_string(),
+            SPARK_ADDRESS_TEST_PUBKEY
+        );
+        assert_eq!(decoded.network, spark::Network::Mainnet);
+        assert!(!decoded.is_invoice());
+    }
+
+    #[test]
+    fn spark_address_for_uses_the_network_prefix() {
+        let address = spark_address_for(SPARK_ADDRESS_TEST_PUBKEY, spark::Network::Regtest)
+            .expect("a valid pubkey encodes");
+        assert!(address.starts_with("sparkrt1"), "{address}");
+    }
+
+    #[test]
+    fn spark_address_for_returns_none_for_an_unparseable_pubkey() {
+        assert_eq!(
+            spark_address_for("not-a-pubkey", spark::Network::Mainnet),
+            None
+        );
+        assert_eq!(spark_address_for("02abc123", spark::Network::Mainnet), None);
+    }
+
+    #[test]
+    fn pay_response_carries_spark_address_only_when_set() {
+        let mut response = PayResponse {
+            callback: "https://example.com/lnurlp/alice/invoice".to_string(),
+            max_sendable: 4_000_000_000,
+            min_sendable: 1000,
+            tag: Tag::Pay,
+            metadata: String::new(),
+            comment_allowed: None,
+            allows_nostr: None,
+            nostr_pubkey: None,
+            spark_address: None,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("sparkAddress").is_none(), "{json}");
+
+        response.spark_address = Some("spark1example".to_string());
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["sparkAddress"], "spark1example");
     }
 }
