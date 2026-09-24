@@ -420,7 +420,7 @@ impl BreezSdk {
                 locked_amount_sat,
                 redirect_url,
             } => {
-                let address = get_deposit_address(&self.spark_wallet, true).await?;
+                let address = get_deposit_address(&self.spark_wallet, &self.storage, true).await?;
                 self.buy_bitcoin_provider
                     .buy_bitcoin(address, locked_amount_sat, redirect_url)
                     .await
@@ -441,7 +441,7 @@ impl BreezSdk {
                 }
                 let receive_response = self
                     .receive_bolt11_invoice(
-                        "Buy Bitcoin via CashApp".to_string(),
+                        "breez-onramp".to_string(),
                         Some(amount_sats),
                         None,
                         None,

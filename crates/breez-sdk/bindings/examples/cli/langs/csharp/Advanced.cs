@@ -20,6 +20,7 @@ public static class AdvancedCommandNames
     public static readonly string[] All =
     {
         "advanced unilateral-exit",
+        "advanced check-unilateral-exit",
         "advanced export-unilateral-exit-state",
         "advanced import-unilateral-exit-state",
     };
@@ -42,6 +43,12 @@ public static class AdvancedCommands
                 Name = "unilateral-exit",
                 Description = "Build and sign a unilateral exit",
                 Run = HandleUnilateralExit
+            },
+            ["check-unilateral-exit"] = new()
+            {
+                Name = "check-unilateral-exit",
+                Description = "Check a signed exit against the chain",
+                Run = HandleCheckUnilateralExit
             },
             ["export-unilateral-exit-state"] = new()
             {
@@ -134,10 +141,11 @@ public static class AdvancedCommands
         var fundingKindStr = GetFlag(args, "--funding-kind") ?? "p2tr";
         var destination = GetFlag(args, "--destination");
         var leafIds = GetAllFlags(args, "--leaf");
+        var outputFile = GetFlag(args, "--output-file");
 
         if (feeRateStr == null || destination == null)
         {
-            Console.WriteLine("Usage: advanced unilateral-exit --fee-rate <N> --destination <addr> [--funding-kind p2tr|p2wpkh] [--leaf <id> ...]");
+            Console.WriteLine("Usage: advanced unilateral-exit --fee-rate <N> --destination <addr> [--funding-kind p2tr|p2wpkh] [--leaf <id> ...] [--output-file <path>]");
             return;
         }
 
@@ -202,6 +210,36 @@ public static class AdvancedCommands
         );
 
         PrintExitTransactions(response);
+        if (outputFile != null)
+        {
+            WriteExit(outputFile, response);
+        }
+    }
+
+    // --- check-unilateral-exit ---
+
+    private static async Task HandleCheckUnilateralExit(BreezSdk sdk, Func<string, string?> readline, string[] args)
+    {
+        var inputFile = GetFlag(args, "--input-file");
+        var outputFile = GetFlag(args, "--output-file");
+
+        if (inputFile == null)
+        {
+            Console.WriteLine("Usage: advanced check-unilateral-exit --input-file <path> [--output-file <path>]");
+            return;
+        }
+
+        var exit = ReadExit(inputFile);
+        var checked_ = await sdk.CheckUnilateralExit(
+            request: new CheckUnilateralExitRequest(exit: exit)
+        );
+        Console.WriteLine($"Verdict: {checked_.verdict}");
+        if (checked_.verdict is UnilateralExitVerdict.Redo)
+        {
+            Console.WriteLine("  (this exit cannot be finished, quote and build it again)");
+        }
+        PrintExitTransactions(checked_.exit);
+        WriteExit(outputFile ?? inputFile, checked_.exit);
     }
 
     private static CpfpInput ParseCpfpInput(string s, string kind)
@@ -266,11 +304,24 @@ public static class AdvancedCommands
             $"left out the exit data of {imported.skippedChains} leaf(s)");
     }
 
+    private static UnilateralExitResponse ReadExit(string path)
+    {
+        var json = File.ReadAllText(path);
+        return Serialization.Deserialize<UnilateralExitResponse>(json);
+    }
+
+    private static void WriteExit(string path, UnilateralExitResponse exit)
+    {
+        File.WriteAllText(path, Serialization.SerializePretty(exit));
+        Console.WriteLine($"Wrote the exit to {path}");
+    }
+
     private static void PrintExitTransactions(UnilateralExitResponse response)
     {
         Console.WriteLine(
             $"Recoverable {response.recoverableValueSat} sats, " +
-            $"total fee {response.totalFeeSat} sats, " +
+            $"total fee {response.totalFeeSat} sats " +
+            $"(cpfp {response.cpfpFeeSat}, fanout {response.fanoutFeeSat}, sweep {response.sweepFeeSat}), " +
             $"{response.transactions.Length} transaction(s):");
 
         for (int i = 0; i < response.transactions.Length; i++)
@@ -285,10 +336,36 @@ public static class AdvancedCommands
             Console.WriteLine(
                 $"  [{i}] {tx.kind} status={tx.status} txid={tx.txid}{after}{csv}");
 
-            if (tx.status == ConfirmationStatus.Confirmed)
+            switch (tx.status)
             {
-                Console.WriteLine("      (already confirmed, nothing to broadcast)");
-                continue;
+                case ExitTransactionStatus.Confirmed confirmed:
+                    if (confirmed.blockHeight != null)
+                    {
+                        Console.WriteLine(
+                            $"      (confirmed in block {confirmed.blockHeight}, nothing to broadcast)");
+                    }
+                    else
+                    {
+                        Console.WriteLine("      (already confirmed, nothing to broadcast)");
+                    }
+                    continue;
+                case ExitTransactionStatus.WaitingForDependencies:
+                    Console.WriteLine("      (waiting on the transactions it depends on)");
+                    break;
+                case ExitTransactionStatus.WaitingForTimelock wft:
+                    if (wft.spendableAtHeight != null)
+                    {
+                        Console.WriteLine(
+                            $"      (waiting for its timelock, until block {wft.spendableAtHeight})");
+                    }
+                    else
+                    {
+                        Console.WriteLine("      (waiting for its timelock)");
+                    }
+                    break;
+                case ExitTransactionStatus.Ready:
+                case ExitTransactionStatus.Unverified:
+                    break;
             }
 
             var package = tx.cpfpTxHex != null

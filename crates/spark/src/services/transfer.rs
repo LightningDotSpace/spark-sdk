@@ -5,16 +5,16 @@ use std::{collections::HashMap, sync::Arc};
 use crate::Network;
 use crate::address::SparkAddress;
 use crate::operator::OperatorPool;
+use crate::operator::rpc as operator_rpc;
 use crate::operator::rpc::spark::transfer_filter::Participant;
 use crate::operator::rpc::spark::{HashVariant, StartTransferRequest, TransferFilter};
-use crate::operator::rpc::{self as operator_rpc, OperatorRpcError};
 use crate::services::models::{
     LeafKeyTweak, Transfer, convert_page, map_signing_nonce_commitments,
     split_signing_commitments_by_variant,
 };
 use crate::services::{TransferId, TransferObserver, TransferStatus};
 use crate::signer::EncryptedSecret;
-use crate::utils::leaf_key_tweak::prepare_leaf_key_tweaks_to_send;
+use crate::signer::LeafSigningKey;
 use crate::utils::paging::{PagingFilter, PagingResult, pager};
 use crate::utils::refund::{SignRefundsParams, SignedRefundTransactions, sign_refunds};
 use crate::utils::tagged_hasher::TaggedHasher;
@@ -164,6 +164,14 @@ impl Drop for ClaimLockGuard<'_> {
     }
 }
 
+/// A leaf being claimed, with the key it arrives under: the sender's new key,
+/// ECIES-encrypted to our identity key.
+#[derive(Debug)]
+struct LeafToClaim {
+    node: TreeNode,
+    incoming_key: EncryptedSecret,
+}
+
 impl TransferService {
     pub fn new(
         spark_signer: Arc<dyn SparkSigner>,
@@ -188,12 +196,11 @@ impl TransferService {
     /// and proofs that are distributed to the statechain operators.
     pub async fn transfer_leaves_to(
         &self,
-        leaves: Vec<TreeNode>,
+        leaves: &[LeafKeyTweak],
         receiver_id: &PublicKey,
         transfer_id: Option<TransferId>,
         spark_invoice: Option<String>,
     ) -> Result<Transfer, ServiceError> {
-        let recover_on_error = transfer_id.is_some();
         let unwrapped_transfer_id = transfer_id.unwrap_or_else(TransferId::generate);
         self.send_transfer_inner(
             &unwrapped_transfer_id,
@@ -201,7 +208,6 @@ impl TransferService {
             receiver_id,
             spark_invoice,
             None,
-            recover_on_error,
         )
         .await
     }
@@ -209,26 +215,23 @@ impl TransferService {
     async fn send_transfer_inner(
         &self,
         transfer_id: &TransferId,
-        leaves: Vec<TreeNode>,
+        leaves: &[LeafKeyTweak],
         receiver_id: &PublicKey,
         spark_invoice: Option<String>,
         prepared: Option<PreparedTransfer>,
-        recover_on_error: bool,
     ) -> Result<Transfer, ServiceError> {
-        self.notify_before_send_transfer(transfer_id, receiver_id, &leaves, spark_invoice.as_ref())
+        self.notify_before_send_transfer(transfer_id, receiver_id, leaves, spark_invoice.as_ref())
             .await?;
 
-        let leaf_key_tweaks = prepare_leaf_key_tweaks_to_send(leaves);
         let prepared = match prepared {
             Some(prepared) => prepared,
             None => {
-                let request =
-                    self.build_prepare_transfer_request(transfer_id, &leaf_key_tweaks, receiver_id);
+                let request = self.build_prepare_transfer_request(transfer_id, leaves, receiver_id);
                 self.spark_signer.prepare_transfer(request).await?
             }
         };
         let prepared_package = self
-            .assemble_transfer_package(&leaf_key_tweaks, receiver_id, None, None, prepared)
+            .assemble_transfer_package(leaves, receiver_id, None, None, prepared)
             .await?;
 
         match self
@@ -241,59 +244,75 @@ impl TransferService {
             .await
         {
             Ok(transfer) => Ok(transfer),
-            Err(e) if recover_on_error => {
-                self.recover_transfer_on_rpc_connection_error(transfer_id, e)
-                    .await
-            }
-            Err(e) => Err(e),
+            // The transfer id is ours whether the caller supplied it or it was
+            // generated here, so a lost response is always recoverable.
+            Err(e) => self.recover_committed_transfer(transfer_id, e).await,
         }
     }
 
-    pub(crate) async fn recover_transfer_on_rpc_connection_error(
+    /// Resolves a submission whose outcome is unknown: if the operators already
+    /// hold `transfer_id`, returns that transfer, otherwise returns `error`.
+    ///
+    /// A failed submission does not mean the operators rejected it. The response
+    /// can be lost after they committed, and the status code does not say which
+    /// happened: a severed connection surfaces as `Unknown` ("transport error")
+    /// and the endpoint's own request timeout as `Cancelled`, neither of which is
+    /// distinguishable from a pre-commit failure. So the transfer's existence is
+    /// the only sound test, and every error is put to it. A transfer id is
+    /// single-use, so a probe that finds nothing costs one query and a probe that
+    /// finds something recovers funds that would otherwise be stranded.
+    pub(crate) async fn recover_committed_transfer(
         &self,
         transfer_id: &TransferId,
         error: ServiceError,
     ) -> Result<Transfer, ServiceError> {
-        if let ServiceError::ServiceConnectionError(operator_rpc_error) = &error
-            && let OperatorRpcError::Connection(status) = operator_rpc_error.as_ref()
-            && matches!(
-                status.code(),
-                tonic::Code::Internal | tonic::Code::AlreadyExists
-            )
-        {
-            // There was an RPC connection error. Check if the transfer already exists remotely.
-            let operator_transfers = self
-                .operator_pool
-                .get_coordinator()
-                .client
-                .query_all_transfers(TransferFilter {
-                    transfer_ids: vec![transfer_id.to_string()],
-                    network: self.network.to_proto_network() as i32,
-                    participant: Some(Participant::SenderIdentityPublicKey(
-                        self.spark_signer
-                            .get_identity_public_key()
-                            .await?
-                            .serialize()
-                            .to_vec(),
-                    )),
-                    ..Default::default()
-                })
-                .await?;
-            if let Some(transfer) = operator_transfers.transfers.into_iter().nth(0) {
-                debug!("Recovered transfer {} after connection error", transfer.id);
-
-                return transfer.try_into();
+        match self.query_own_transfer(transfer_id).await {
+            Ok(Some(transfer)) => {
+                debug!("Recovered committed transfer {transfer_id} after a failed submission");
+                transfer.try_into()
+            }
+            Ok(None) => Err(error),
+            // The probe is a diagnosis of `error`, so its own failure must not
+            // replace it: the caller needs the reason the submission failed.
+            Err(probe_error) => {
+                warn!(
+                    "Could not determine whether transfer {transfer_id} committed: {probe_error:?}"
+                );
+                Err(error)
             }
         }
+    }
 
-        Err(error)
+    /// Looks up a transfer the local identity sent, by id.
+    async fn query_own_transfer(
+        &self,
+        transfer_id: &TransferId,
+    ) -> Result<Option<operator_rpc::spark::Transfer>, ServiceError> {
+        let operator_transfers = self
+            .operator_pool
+            .get_coordinator()
+            .client
+            .query_all_transfers(TransferFilter {
+                transfer_ids: vec![transfer_id.to_string()],
+                network: self.network.to_proto_network() as i32,
+                participant: Some(Participant::SenderIdentityPublicKey(
+                    self.spark_signer
+                        .get_identity_public_key()
+                        .await?
+                        .serialize()
+                        .to_vec(),
+                )),
+                ..Default::default()
+            })
+            .await?;
+        Ok(operator_transfers.transfers.into_iter().next())
     }
 
     async fn notify_before_send_transfer(
         &self,
         transfer_id: &TransferId,
         receiver_id: &PublicKey,
-        leaves: &[TreeNode],
+        leaves: &[LeafKeyTweak],
         spark_invoice: Option<&String>,
     ) -> Result<(), ServiceError> {
         let Some(transfer_observer) = &self.transfer_observer else {
@@ -303,7 +322,7 @@ impl TransferService {
             return Ok(());
         }
         let receiver_address = SparkAddress::new(*receiver_id, self.network, None);
-        let amount_sats: u64 = leaves.iter().map(|l| l.value).sum();
+        let amount_sats: u64 = leaves.iter().map(|l| l.node.value).sum();
         let pay_request = spark_invoice
             .cloned()
             .or(receiver_address.to_address_string().ok())
@@ -319,28 +338,26 @@ impl TransferService {
     pub fn build_transfer_approval_request(
         &self,
         transfer_id: &TransferId,
-        leaves: &[TreeNode],
+        leaves: &[LeafKeyTweak],
         receiver_public_key: &PublicKey,
     ) -> PrepareTransferRequest {
-        let leaf_key_tweaks = prepare_leaf_key_tweaks_to_send(leaves.to_vec());
-        self.build_prepare_transfer_request(transfer_id, &leaf_key_tweaks, receiver_public_key)
+        self.build_prepare_transfer_request(transfer_id, leaves, receiver_public_key)
     }
 
     pub async fn submit_transfer_with_prepared(
         &self,
         transfer_id: &TransferId,
-        leaves: &[TreeNode],
+        leaves: &[LeafKeyTweak],
         receiver_public_key: &PublicKey,
         prepared: PreparedTransfer,
         spark_invoice: Option<String>,
     ) -> Result<Transfer, ServiceError> {
         self.send_transfer_inner(
             transfer_id,
-            leaves.to_vec(),
+            leaves,
             receiver_public_key,
             spark_invoice,
             Some(prepared),
-            true,
         )
         .await
     }
@@ -393,6 +410,7 @@ impl TransferService {
                 .map(|l| TransferLeafInput {
                     node: l.node.clone(),
                     new_leaf_id: TreeNodeId::generate(),
+                    signing_key: l.signing_key.clone(),
                 })
                 .collect(),
             operator_recipients: self.operator_recipients(),
@@ -457,6 +475,7 @@ impl TransferService {
         .await?;
 
         let transfer_package = operator_rpc::spark::TransferPackage {
+            delegation_intent: None,
             leaves_to_send: cpfp_signed_tx
                 .iter()
                 .map(|l| l.try_into())
@@ -729,12 +748,12 @@ impl TransferService {
         Some(leaves)
     }
 
-    /// Prepares leaves for claiming by creating LeafKeyTweak structs
+    /// Pairs each leaf of `transfer` with the key it arrives under.
     async fn prepare_leaves_for_claiming(
         &self,
         transfer: &Transfer,
         leaf_key_map: &HashMap<TreeNodeId, EncryptedSecret>,
-    ) -> Result<Vec<LeafKeyTweak>, ServiceError> {
+    ) -> Result<Vec<LeafToClaim>, ServiceError> {
         let mut leaves_to_claim = Vec::new();
 
         for leaf in &transfer.leaves {
@@ -742,9 +761,9 @@ impl TransferService {
                 continue;
             };
 
-            leaves_to_claim.push(LeafKeyTweak {
+            leaves_to_claim.push(LeafToClaim {
                 node: leaf.leaf_with_intermediate_txs(),
-                incoming_key: Some(leaf_key.clone()),
+                incoming_key: leaf_key.clone(),
             });
         }
 
@@ -759,7 +778,7 @@ impl TransferService {
     async fn claim_transfer_with_leaves(
         &self,
         transfer: &Transfer,
-        leaves_to_claim: Vec<LeafKeyTweak>,
+        leaves_to_claim: Vec<LeafToClaim>,
     ) -> Result<Vec<TreeNode>, ServiceError> {
         trace!("Claiming transfer with leaves: {:?}", leaves_to_claim);
 
@@ -803,7 +822,7 @@ impl TransferService {
     async fn prepare_claim_package(
         &self,
         transfer: &Transfer,
-        leaves: &[LeafKeyTweak],
+        leaves: &[LeafToClaim],
     ) -> Result<operator_rpc::spark::ClaimPackage, ServiceError> {
         if leaves.is_empty() {
             return Err(ServiceError::NoLeavesToClaim);
@@ -841,11 +860,6 @@ impl TransferService {
         let claim_leaves = leaves
             .iter()
             .map(|leaf| {
-                let Some(cipher) = &leaf.incoming_key else {
-                    return Err(ServiceError::InvalidInput(
-                        "claim leaf must carry the encrypted incoming key".to_string(),
-                    ));
-                };
                 let sender_signature = transfer
                     .leaves
                     .iter()
@@ -853,13 +867,13 @@ impl TransferService {
                     .and_then(|tl| tl.signature)
                     .map(|s| s.serialize_compact().to_vec())
                     .unwrap_or_default();
-                Ok(ClaimLeafInput {
+                ClaimLeafInput {
                     node: leaf.node.clone(),
                     sender_signature,
-                    leaf_key_ciphertext: cipher.as_slice().to_vec(),
-                })
+                    leaf_key_ciphertext: leaf.incoming_key.as_slice().to_vec(),
+                }
             })
-            .collect::<Result<Vec<_>, ServiceError>>()?;
+            .collect();
 
         let prepared = self
             .spark_signer
@@ -914,7 +928,7 @@ impl TransferService {
     /// aggregates server-side during `claim_transfer`.
     async fn sign_claim_refunds(
         &self,
-        leaves: &[LeafKeyTweak],
+        leaves: &[LeafToClaim],
         cpfp_commitments: &[std::collections::BTreeMap<
             Identifier,
             frost_secp256k1_tr::round1::SigningCommitments,
@@ -941,6 +955,9 @@ impl TransferService {
         for (i, leaf) in leaves.iter().enumerate() {
             // The claim refund is signed with the receiver's new leaf key, which
             // is the derived key for this node id.
+            let signing_key = LeafSigningKey {
+                derived_from: leaf.node.id.clone(),
+            };
             let signing_public_key = self
                 .spark_signer
                 .get_public_key_for_leaf(&leaf.node.id)
@@ -1018,6 +1035,7 @@ impl TransferService {
             let cpfp_sighash = sighash_from_tx(&cpfp_refund_tx, 0, node_tx_out)?;
             let cpfp = build_refund_signing_job(
                 &leaf.node.id,
+                &signing_key,
                 &verifying_key,
                 &signing_public_key,
                 cpfp_refund_tx,
@@ -1034,6 +1052,7 @@ impl TransferService {
                 let sighash = sighash_from_tx(&direct_refund_tx, 0, direct_tx_out)?;
                 Some(build_refund_signing_job(
                     &leaf.node.id,
+                    &signing_key,
                     &verifying_key,
                     &signing_public_key,
                     direct_refund_tx,
@@ -1050,6 +1069,7 @@ impl TransferService {
                 let sighash = sighash_from_tx(&dfc_refund_tx, 0, node_tx_out)?;
                 Some(build_refund_signing_job(
                     &leaf.node.id,
+                    &signing_key,
                     &verifying_key,
                     &signing_public_key,
                     dfc_refund_tx,
@@ -1345,8 +1365,18 @@ fn node_timelock(
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaimLocks, TransferId, node_timelock};
+    use std::sync::Arc;
+
+    use macros::async_test_all;
+
+    use super::{ClaimLocks, LeafToClaim, TransferId, TransferService, node_timelock};
+    use crate::Network;
+    use crate::operator::testing::unroutable_operator_pool;
+    use crate::services::LeafKeyTweak;
+    use crate::signer::testing::{RecordingSparkSigner, operator_commitments};
+    use crate::signer::{EncryptedSecret, FrostDerivation, LeafSigningKey, SparkSigner};
     use crate::tree::TreeNodeId;
+    use crate::tree::tests::{create_test_leaf_held_under, create_test_tree_node};
     use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
         absolute::LockTime, transaction::Version,
@@ -1510,5 +1540,101 @@ mod tests {
         drop(cancelled);
 
         assert_eq!(claim_locks.len(), 0, "a cancelled claim stranded its lock");
+    }
+
+    /// A claim signs its refunds with the key derived from the node id, the key
+    /// it moves the leaf to, and records them under that key, whatever key the
+    /// leaf arrived under.
+    #[async_test_all]
+    async fn a_claim_signs_its_refunds_with_the_node_id_key() {
+        let recorder = Arc::new(RecordingSparkSigner::new());
+        let signer: Arc<dyn SparkSigner> = recorder.clone();
+        let service = TransferService::new(
+            Arc::clone(&signer),
+            Network::Regtest,
+            2,
+            unroutable_operator_pool(&signer).await,
+            None,
+        );
+        let node_id: TreeNodeId = "leaf".parse().unwrap();
+        let node_key = signer.get_public_key_for_leaf(&node_id).await.unwrap();
+        let incoming_key = signer
+            .get_public_key_for_leaf(&TreeNodeId::generate())
+            .await
+            .unwrap();
+        let leaf = LeafToClaim {
+            node: create_test_leaf_held_under("leaf", incoming_key),
+            incoming_key: EncryptedSecret::new(Vec::new()),
+        };
+
+        let (cpfp, direct, direct_from_cpfp) = service
+            .sign_claim_refunds(
+                std::slice::from_ref(&leaf),
+                &[operator_commitments(3).await],
+                &[operator_commitments(3).await],
+                &[operator_commitments(3).await],
+            )
+            .await
+            .unwrap();
+
+        let derivations = recorder.frost_derivations();
+        assert!(!derivations.is_empty());
+        assert!(
+            derivations.iter().all(|d| *d
+                == FrostDerivation::SigningLeaf {
+                    leaf_id: node_id.clone()
+                }),
+            "{derivations:?}"
+        );
+        let jobs: Vec<_> = cpfp
+            .iter()
+            .chain(&direct)
+            .chain(&direct_from_cpfp)
+            .collect();
+        assert_eq!(jobs.len(), derivations.len());
+        for job in jobs {
+            assert_eq!(job.leaf_id, node_id.to_string());
+            assert_eq!(job.signing_public_key, node_key.serialize().to_vec());
+        }
+    }
+
+    /// The request a send is approved and signed from names each leaf by its
+    /// node id, with the key it is held under and a fresh id for its new key.
+    #[async_test_all]
+    async fn a_send_request_names_the_key_each_leaf_is_held_under() {
+        let signer: Arc<dyn SparkSigner> = Arc::new(RecordingSparkSigner::new());
+        let service = TransferService::new(
+            Arc::clone(&signer),
+            Network::Regtest,
+            2,
+            unroutable_operator_pool(&signer).await,
+            None,
+        );
+        let leaves = vec![
+            LeafKeyTweak {
+                node: create_test_tree_node("created", 1_000),
+                signing_key: LeafSigningKey {
+                    derived_from: TreeNodeId::generate(),
+                },
+            },
+            LeafKeyTweak {
+                node: create_test_tree_node("received", 2_000),
+                signing_key: LeafSigningKey {
+                    derived_from: "received".parse().unwrap(),
+                },
+            },
+        ];
+        let receiver = signer.get_identity_public_key().await.unwrap();
+
+        let request =
+            service.build_transfer_approval_request(&TransferId::generate(), &leaves, &receiver);
+
+        assert_eq!(request.leaves.len(), leaves.len());
+        for (input, leaf) in request.leaves.iter().zip(&leaves) {
+            assert_eq!(input.node.id, leaf.node.id);
+            assert_eq!(input.signing_key, leaf.signing_key);
+            assert_ne!(input.new_leaf_id, leaf.signing_key.derived_from);
+        }
+        assert_ne!(request.leaves[0].new_leaf_id, request.leaves[1].new_leaf_id);
     }
 }

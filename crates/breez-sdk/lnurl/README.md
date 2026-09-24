@@ -46,10 +46,10 @@ brew install protobuf openssl pkg-config
 From the repository root:
 
 ```shell
-cargo build --release --manifest-path crates/breez-sdk/lnurl/Cargo.toml
+cargo build --profile release-lnurl -p lnurl
 ```
 
-The compiled binary will be available at `target/release/lnurl`.
+The compiled binary will be available at `target/release-lnurl/lnurl`.
 
 ## How to Run
 
@@ -77,7 +77,7 @@ docker run -p 8080:8080 \
 If you've built the binary, you can run it directly:
 
 ```shell
-./target/release/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" --domains="yourdomain.com" --default-api-key="<breez-api-key>" --auto-migrate
+./target/release-lnurl/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" --domains="yourdomain.com" --default-api-key="<breez-api-key>" --auto-migrate
 ```
 
 ## Configuration
@@ -110,6 +110,7 @@ db_url = "postgres://user:password@localhost:5432/lnurl_db"
 # LNURL payment configuration
 min_sendable = 1000                 # Minimum amount in millisatoshi (1 sat)
 max_sendable = 4000000000           # Maximum amount in millisatoshi (4,000,000 sats)
+pay_response_spark_address = false  # Add the user's Spark address to the LNURL-pay response
 max_registrations_per_day = 5       # Address registrations per pubkey per domain
                                     # in a rolling 24h window (0 disables)
 domains = "yourdomain.com"          # Comma-separated list of allowed domains
@@ -129,6 +130,7 @@ default_api_key = "<breez-api-key>" # Fallback Breez API key for partner attribu
 | `--network` | Spark network (mainnet, testnet, regtest) | `mainnet` |
 | `--min-sendable` | Minimum payment amount (millisatoshi) | `1000` |
 | `--max-sendable` | Maximum payment amount (millisatoshi) | `4000000000` |
+| `--pay-response-spark-address` | Include the user's Spark address (`sparkAddress`) in the LNURL-pay response, so payers that support it can transfer on Spark instead of over Lightning; publishes which Spark address is behind a name | `false` |
 | `--max-registrations-per-day` | Address registrations one pubkey may perform per domain in a rolling 24h window, refused with `429` past it (`0` disables) | `5` |
 | `--webhook-domain` | Domain for the webhook URL registered with the SSP | (none) |
 | `--ssp-auth-seed` | Hex-encoded 32-byte seed for SSP authentication | (random) |
@@ -168,6 +170,8 @@ The LNURL server provides the following endpoints:
 - `/.well-known/lnurlp/{username}` - LNURL-pay endpoint for Lightning Address handling
 - `/lnurlp/{username}` - Alternative LNURL-pay endpoint 
 - `/lnurlp/{username}/invoice` - Invoice generation endpoint for LNURL-pay
+- `/health` - Liveness: answers 200 while the process serves requests
+- `/ready` - Readiness: 200 while the database answers, 503 otherwise. Point container healthchecks here
 
 ### Authenticated Endpoints (require API key)
 
@@ -272,7 +276,7 @@ pubkey that released it.
 
 ```shell
 # Point at a local database with auto-migrations
-./target/release/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" \
+./target/release-lnurl/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" \
   --domains="localhost:8080" \
   --auto-migrate \
   --scheme="http"
@@ -282,7 +286,7 @@ pubkey that released it.
 
 ```shell
 # Setup PostgreSQL database with auto-migrations
-./target/release/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" \
+./target/release-lnurl/lnurl --db-url="postgres://user:password@localhost:5432/lnurl_db" \
   --domains="yourdomain.com" \
   --auto-migrate \
   --address="0.0.0.0:8080"
@@ -326,21 +330,12 @@ volumes:
 
 ## Testing
 
-The tests run against a real PostgreSQL instance. Each test gets its own schema,
-so they can share one database, but the tests create and drop schemas in it:
-point `LNURL_TEST_POSTGRES_URL` at a disposable instance, never at real data.
+The tests run against a real PostgreSQL instance, started per test as a
+throwaway container, so Docker has to be running.
 
 ```shell
-docker run -d --rm --name lnurl-pg-test \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lnurl_test \
-  -p 55432:5432 postgres:16-alpine
-
-LNURL_TEST_POSTGRES_URL="postgres://postgres:postgres@localhost:55432/lnurl_test" \
-  make lnurl-test
+cargo test -p lnurl
 ```
-
-Without `LNURL_TEST_POSTGRES_URL` the database-backed tests fail rather than
-silently skip.
 
 ## License
 

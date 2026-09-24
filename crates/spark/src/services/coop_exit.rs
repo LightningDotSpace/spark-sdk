@@ -7,7 +7,7 @@ use bitcoin::{Address, OutPoint, Transaction, Txid};
 use frost_secp256k1_tr::Identifier;
 use platform_utils::time::SystemTime;
 use serde::Serialize;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::bitcoin::{sighash_from_multi_input_tx, sighash_from_tx};
 use crate::core::{Network, next_sequence};
@@ -24,10 +24,10 @@ use crate::signer::{
 };
 use crate::ssp::RequestCoopExitInput;
 use crate::ssp::ServiceProvider;
+use crate::ssp::{CoopExitAcceptance, SparkCoopExitRequestStatus};
 use crate::tree::TreeNode;
 use crate::tree::TreeNodeId;
 use crate::utils::frost::derive_leaf_signing_public_key;
-use crate::utils::leaf_key_tweak::prepare_leaf_key_tweaks_to_send;
 use crate::utils::time::web_time_to_prost_timestamp;
 use crate::utils::transactions::{
     ConnectorRefundTxsParams, RefundTransactions, create_connector_refund_txs,
@@ -35,6 +35,11 @@ use crate::utils::transactions::{
 
 const COOP_EXIT_EXPIRY_DURATION_MAINNET: Duration = Duration::from_secs(7 * 24 * 60 * 60 + 5 * 60); // 1 week + 5 minutes
 const COOP_EXIT_EXPIRY_DURATION: Duration = Duration::from_secs(35 * 60); // 35 minutes
+
+/// Attempts at the completion request that turns a committed transfer into an
+/// on-chain payout.
+const COMPLETE_EXIT_ATTEMPTS: u32 = 3;
+const COMPLETE_EXIT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoopExitSpeedFeeQuote {
@@ -91,12 +96,12 @@ impl TryFrom<crate::ssp::CoopExitFeeQuote> for CoopExitFeeQuote {
 }
 
 pub struct CoopExitParams<'a> {
-    pub leaves: Vec<TreeNode>,
+    pub leaves: Vec<LeafKeyTweak>,
     pub withdrawal_address: &'a Address,
     pub withdraw_all: bool,
     pub exit_speed: ExitSpeed,
     pub fee_quote_id: Option<String>,
-    pub fee_leaves: Option<Vec<TreeNode>>,
+    pub fee_leaves: Option<Vec<LeafKeyTweak>>,
     pub fee_sats: u64,
     pub transfer_id: Option<TransferId>,
 }
@@ -159,7 +164,7 @@ impl CoopExitService {
 
     pub fn prepare_coop_exit(
         &self,
-        leaves: &[TreeNode],
+        leaves: &[LeafKeyTweak],
         transfer_id: Option<TransferId>,
     ) -> PrepareTransferRequest {
         let ssp_identity_public_key = self.ssp_client.identity_public_key();
@@ -199,13 +204,10 @@ impl CoopExitService {
             transfer_id,
         } = params;
         debug!("Starting cooperative exit with leaves");
-        let leaf_external_ids = leaves.iter().map(|l| l.id.clone().to_string()).collect();
-        let fee_leaf_external_ids = fee_leaves.as_ref().map(|fee_leaves| {
-            fee_leaves
-                .iter()
-                .map(|l| l.id.clone().to_string())
-                .collect()
-        });
+        let leaf_external_ids = leaves.iter().map(|l| l.node.id.to_string()).collect();
+        let fee_leaf_external_ids = fee_leaves
+            .as_ref()
+            .map(|fee_leaves| fee_leaves.iter().map(|l| l.node.id.to_string()).collect());
         trace!("Leaf external IDs for cooperative exit: {leaf_external_ids:?}");
         trace!("Fee leaf external IDs for cooperative exit: {fee_leaf_external_ids:?}");
 
@@ -214,7 +216,7 @@ impl CoopExitService {
             None => TransferId::generate(),
         };
 
-        let leaves_sum: u64 = leaves.iter().map(|l| l.value).sum();
+        let leaves_sum: u64 = leaves.iter().map(|l| l.node.value).sum();
         let expected_payout_amount_sats = if withdraw_all {
             leaves_sum.saturating_sub(fee_sats)
         } else {
@@ -227,9 +229,8 @@ impl CoopExitService {
                 .await?;
         }
 
-        // Build leaf key tweaks for all leaves
-        let all_leaves = [leaves, fee_leaves.unwrap_or_default()].concat();
-        let leaf_key_tweaks = prepare_leaf_key_tweaks_to_send(all_leaves);
+        let mut leaf_key_tweaks = leaves;
+        leaf_key_tweaks.extend(fee_leaves.unwrap_or_default());
 
         // Request cooperative exit from the SSP
         trace!("Requesting cooperative exit");
@@ -278,32 +279,102 @@ impl CoopExitService {
                 leaf_key_tweaks,
                 connector_txid,
                 coop_exit_input,
-                unwrapped_transfer_id,
+                unwrapped_transfer_id.clone(),
                 raw_connector_transaction_bytes.clone(),
                 prepared,
             )
             .await;
-        let transfer = match (&transfer_id, res) {
-            (_, Ok(t)) => t,
+        let transfer = match res {
+            Ok(t) => t,
             // The transfer can commit server-side and still lose its response. Bind
             // the recovered transfer rather than returning it: the exit is only
             // finished once complete_coop_exit tells the SSP to broadcast the payout.
-            (Some(transfer_id), Err(e)) => {
+            Err(e) => {
                 self.transfer_service
-                    .recover_transfer_on_rpc_connection_error(transfer_id, e)
+                    .recover_committed_transfer(&unwrapped_transfer_id, e)
                     .await?
             }
-            (None, Err(e)) => return Err(e),
         };
         trace!("Submitted cooperative exit transfer: {transfer:?}");
 
-        let complete_response = self
-            .ssp_client
-            .complete_coop_exit(&transfer.id.to_string(), &coop_exit_request.id)
+        self.request_payout(&unwrapped_transfer_id, &coop_exit_request.id)
             .await?;
-        trace!("Completed cooperative exit: {complete_response:?}",);
 
         Ok(transfer)
+    }
+
+    /// Asks the SSP to broadcast the payout for an exit whose transfer has
+    /// already committed, retrying while the outcome is unknown.
+    ///
+    /// By this point the leaves belong to the SSP, so an unanswered request
+    /// leaves the withdrawal with nowhere to go: re-reading the request between
+    /// attempts settles whether a lost response was in fact received.
+    async fn request_payout(
+        &self,
+        transfer_id: &TransferId,
+        request_id: &str,
+    ) -> Result<(), ServiceError> {
+        let mut last_error = None;
+        for attempt in 0..COMPLETE_EXIT_ATTEMPTS {
+            if attempt > 0 {
+                match self.exit_status(request_id).await {
+                    Ok(status) => match status.acceptance() {
+                        // A lost response that the SSP did in fact receive.
+                        CoopExitAcceptance::Accepted => {
+                            debug!("Cooperative exit {request_id} was accepted as {status:?}");
+                            return Ok(());
+                        }
+                        // Asking again cannot revive it, and reporting success
+                        // would claim a payout that will never be broadcast.
+                        CoopExitAcceptance::Failed => {
+                            return Err(ServiceError::Generic(format!(
+                                "Cooperative exit {request_id} cannot pay out: {status:?}"
+                            )));
+                        }
+                        CoopExitAcceptance::AwaitingCompletion => {}
+                    },
+                    Err(e) => debug!("Could not re-read cooperative exit {request_id}: {e:?}"),
+                }
+                platform_utils::tokio::time::sleep(COMPLETE_EXIT_RETRY_DELAY).await;
+            }
+            match self
+                .ssp_client
+                .complete_coop_exit(&transfer_id.to_string(), request_id)
+                .await
+            {
+                Ok(response) => {
+                    trace!("Completed cooperative exit: {response:?}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to complete cooperative exit {request_id} \
+                         (attempt {}/{COMPLETE_EXIT_ATTEMPTS}): {e:?}",
+                        attempt.saturating_add(1),
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+        Err(last_error.map_or_else(
+            || ServiceError::Generic("Cooperative exit completion was never attempted".to_string()),
+            ServiceError::from,
+        ))
+    }
+
+    /// Reads how far the SSP has taken a cooperative exit request.
+    async fn exit_status(
+        &self,
+        request_id: &str,
+    ) -> Result<SparkCoopExitRequestStatus, ServiceError> {
+        let request = self
+            .ssp_client
+            .get_coop_exit_request(request_id)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::Generic(format!("Cooperative exit request {request_id} not found"))
+            })?;
+        Ok(request.exit_status)
     }
 
     /// Submits the cooperative-exit transfer to the coordinator as a single
@@ -383,6 +454,7 @@ impl CoopExitService {
                             .map(|l| TransferLeafInput {
                                 node: l.node.clone(),
                                 new_leaf_id: TreeNodeId::generate(),
+                                signing_key: l.signing_key.clone(),
                             })
                             .collect(),
                         operator_recipients: self.operator_recipients(),
@@ -393,6 +465,7 @@ impl CoopExitService {
         };
 
         let signed_package = operator_rpc::spark::TransferPackage {
+            delegation_intent: None,
             leaves_to_send: cpfp_jobs,
             direct_leaves_to_send: direct_jobs,
             direct_from_cpfp_leaves_to_send: direct_from_cpfp_jobs,
@@ -535,6 +608,7 @@ impl CoopExitService {
             }?;
             let cpfp = build_refund_signing_job(
                 &leaf.node.id,
+                &leaf.signing_key,
                 &verifying_key,
                 &signing_public_key,
                 cpfp_refund_tx,
@@ -560,6 +634,7 @@ impl CoopExitService {
                 }?;
                 Some(build_refund_signing_job(
                     &leaf.node.id,
+                    &leaf.signing_key,
                     &verifying_key,
                     &signing_public_key,
                     direct_refund_tx,
@@ -583,6 +658,7 @@ impl CoopExitService {
                 }?;
                 Some(build_refund_signing_job(
                     &leaf.node.id,
+                    &leaf.signing_key,
                     &verifying_key,
                     &signing_public_key,
                     dfc_refund_tx,
@@ -657,7 +733,14 @@ mod tests {
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::transaction::Version;
     use bitcoin::{Amount, ScriptBuf, Sequence, TxIn, TxOut, Witness};
-    use macros::test_all;
+    use macros::{async_test_all, test_all};
+
+    use crate::operator::testing::unroutable_operator_pool;
+    use crate::session_store::InMemorySessionStore;
+    use crate::signer::testing::{RecordingSparkSigner, operator_commitments};
+    use crate::signer::{FrostDerivation, LeafSigningKey};
+    use crate::ssp::{RetryConfig, ServiceProviderConfig};
+    use crate::tree::tests::create_test_leaf_held_under;
 
     #[cfg(feature = "browser-tests")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -738,5 +821,91 @@ mod tests {
 
         assert!(validate_coop_exit_payout_transaction("", &txid, &addr, 1000).is_err());
         assert!(validate_coop_exit_payout_transaction(&raw, "", &addr, 1000).is_err());
+    }
+
+    /// A coop exit signs every connector refund with the key the leaf is held
+    /// under, and records them under that key, whatever id the key derives from.
+    #[async_test_all]
+    async fn a_coop_exit_signs_its_refunds_with_the_key_the_leaf_is_held_under() {
+        for held_under in [TreeNodeId::generate(), "leaf".parse().unwrap()] {
+            let recorder = Arc::new(RecordingSparkSigner::new());
+            let signer: Arc<dyn SparkSigner> = recorder.clone();
+            let identity = signer.get_identity_public_key().await.unwrap();
+            let operator_pool = unroutable_operator_pool(&signer).await;
+            let ssp_client = Arc::new(
+                ServiceProvider::new(
+                    ServiceProviderConfig {
+                        base_url: "http://127.0.0.1:1".to_string(),
+                        schema_endpoint: None,
+                        identity_public_key: identity,
+                        user_agent: None,
+                        retry_config: RetryConfig::default(),
+                    },
+                    Arc::clone(&signer),
+                    Arc::new(InMemorySessionStore::default()),
+                    None,
+                )
+                .unwrap(),
+            );
+            let transfer_service = Arc::new(TransferService::new(
+                Arc::clone(&signer),
+                Network::Regtest,
+                2,
+                Arc::clone(&operator_pool),
+                None,
+            ));
+            let service = CoopExitService::new(
+                operator_pool,
+                ssp_client,
+                transfer_service,
+                Network::Regtest,
+                Arc::clone(&signer),
+                None,
+            );
+            let held_key = signer.get_public_key_for_leaf(&held_under).await.unwrap();
+            let leaf = LeafKeyTweak {
+                node: create_test_leaf_held_under("leaf", held_key),
+                signing_key: LeafSigningKey {
+                    derived_from: held_under.clone(),
+                },
+            };
+            let connector_tx = exit_tx(vec![TxOut {
+                value: Amount::from_sat(330),
+                script_pubkey: ScriptBuf::new(),
+            }]);
+
+            let (cpfp, direct, direct_from_cpfp) = service
+                .sign_coop_exit_refunds_into_jobs(
+                    std::slice::from_ref(&leaf),
+                    &identity,
+                    connector_tx.compute_txid(),
+                    &connector_tx,
+                    &[operator_commitments(3).await],
+                    &[operator_commitments(3).await],
+                    &[operator_commitments(3).await],
+                )
+                .await
+                .unwrap();
+
+            let derivations = recorder.frost_derivations();
+            assert!(!derivations.is_empty());
+            assert!(
+                derivations.iter().all(|d| *d
+                    == FrostDerivation::SigningLeaf {
+                        leaf_id: held_under.clone()
+                    }),
+                "{derivations:?}"
+            );
+            let jobs: Vec<_> = cpfp
+                .iter()
+                .chain(&direct)
+                .chain(&direct_from_cpfp)
+                .collect();
+            assert_eq!(jobs.len(), derivations.len());
+            for job in jobs {
+                assert_eq!(job.leaf_id, "leaf");
+                assert_eq!(job.signing_public_key, held_key.serialize().to_vec());
+            }
+        }
     }
 }

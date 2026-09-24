@@ -61,6 +61,37 @@ func BuildExit(sdk *breez_sdk_spark.BreezSdk, quote breez_sdk_spark.PrepareUnila
 	return nil
 }
 
+func CheckExit(sdk *breez_sdk_spark.BreezSdk, stored breez_sdk_spark.UnilateralExitResponse) error {
+	// ANCHOR: check-unilateral-exit
+	checked, err := sdk.CheckUnilateralExit(breez_sdk_spark.CheckUnilateralExitRequest{
+		Exit: stored,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Store this one in place of the one you had.
+	exit := checked.Exit
+
+	switch verdict := checked.Verdict.(type) {
+	case breez_sdk_spark.UnilateralExitVerdictValid:
+		for _, tx := range exit.Transactions {
+			if _, ready := tx.Status.(breez_sdk_spark.ExitTransactionStatusReady); ready {
+				log.Printf("ready to broadcast: %s", tx.Txid)
+			}
+		}
+	case breez_sdk_spark.UnilateralExitVerdictDone:
+		log.Printf("The exit finished: %d sats recovered", exit.RecoverableValueSat)
+	case breez_sdk_spark.UnilateralExitVerdictRedo:
+		// Quote and build again, naming the same leaves. Pass exit.FundingInputs
+		// back and the SDK follows them to whatever they have become.
+		log.Printf("Build the exit again: %v", verdict.Reason)
+	}
+	// ANCHOR_END: check-unilateral-exit
+
+	return nil
+}
+
 func ExportExitState(sdk *breez_sdk_spark.BreezSdk) (string, error) {
 	// ANCHOR: export-unilateral-exit-state
 	exported, err := sdk.ExportUnilateralExitState()
@@ -86,6 +117,21 @@ func ImportExitState(sdk *breez_sdk_spark.BreezSdk, exitState string) error {
 
 	log.Printf("Imported %d leaves, skipped %d", imported.ImportedLeaves, imported.SkippedForeignLeaves)
 	// ANCHOR_END: import-unilateral-exit-state
+
+	return nil
+}
+
+func SyncExitData(sdk *breez_sdk_spark.BreezSdk) error {
+	// ANCHOR: sync-exit-data
+	// With automatic collection off, an explicit sync is what collects the data
+	// a unilateral exit needs, and it waits for the collection to finish. Needs
+	// the Spark operators reachable, so run it on a schedule rather than at the
+	// moment an exit is needed.
+	_, err := sdk.SyncWallet(breez_sdk_spark.SyncWalletRequest{})
+	if err != nil {
+		return err
+	}
+	// ANCHOR_END: sync-exit-data
 
 	return nil
 }

@@ -1,14 +1,19 @@
 import logging
 from breez_sdk_spark import (
     BreezSdk,
+    CheckUnilateralExitRequest,
     CpfpFundingKind,
     CpfpInput,
     CpfpSigner,
     ExitLeafSelection,
+    ExitTransactionStatus,
     ImportUnilateralExitStateRequest,
     PrepareUnilateralExitRequest,
     PrepareUnilateralExitResponse,
+    SyncWalletRequest,
     UnilateralExitRequest,
+    UnilateralExitResponse,
+    UnilateralExitVerdict,
     single_key_cpfp_signer,
 )
 
@@ -69,6 +74,32 @@ async def build_exit(sdk: BreezSdk, quote: PrepareUnilateralExitResponse):
         raise
 
 
+async def check_exit(sdk: BreezSdk, stored: UnilateralExitResponse):
+    try:
+        # ANCHOR: check-unilateral-exit
+        checked = await sdk.check_unilateral_exit(
+            request=CheckUnilateralExitRequest(exit=stored)
+        )
+
+        # Store this one in place of the one you had.
+        exit = checked.exit
+
+        if isinstance(checked.verdict, UnilateralExitVerdict.VALID):
+            for tx in exit.transactions:
+                if isinstance(tx.status, ExitTransactionStatus.READY):
+                    logging.debug(f"ready to broadcast: {tx.txid}")
+        elif isinstance(checked.verdict, UnilateralExitVerdict.DONE):
+            logging.debug(f"The exit finished: {exit.recoverable_value_sat} sats recovered")
+        elif isinstance(checked.verdict, UnilateralExitVerdict.REDO):
+            # Quote and build again, naming the same leaves. Pass exit.funding_inputs
+            # back and the SDK follows them to whatever they have become.
+            logging.debug(f"Build the exit again: {checked.verdict.reason}")
+        # ANCHOR_END: check-unilateral-exit
+    except Exception as error:
+        logging.error(error)
+        raise
+
+
 async def export_exit_state(sdk: BreezSdk) -> str:
     try:
         # ANCHOR: export-unilateral-exit-state
@@ -95,6 +126,20 @@ async def import_exit_state(sdk: BreezSdk, exit_state: str):
             f"skipped {imported.skipped_foreign_leaves}"
         )
         # ANCHOR_END: import-unilateral-exit-state
+    except Exception as error:
+        logging.error(error)
+        raise
+
+
+async def sync_exit_data(sdk: BreezSdk):
+    try:
+        # ANCHOR: sync-exit-data
+        # With automatic collection off, an explicit sync is what collects the data
+        # a unilateral exit needs, and it waits for the collection to finish. Needs
+        # the Spark operators reachable, so run it on a schedule rather than at the
+        # moment an exit is needed.
+        await sdk.sync_wallet(request=SyncWalletRequest())
+        # ANCHOR_END: sync-exit-data
     except Exception as error:
         logging.error(error)
         raise

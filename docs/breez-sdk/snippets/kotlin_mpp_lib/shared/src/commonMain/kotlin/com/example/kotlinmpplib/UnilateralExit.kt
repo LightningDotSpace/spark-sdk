@@ -53,6 +53,45 @@ class UnilateralExit {
         // ANCHOR_END: unilateral-exit
     }
 
+    suspend fun checkExit(sdk: BreezSdk, stored: UnilateralExitResponse) {
+        // ANCHOR: check-unilateral-exit
+        val checked = sdk.checkUnilateralExit(
+            CheckUnilateralExitRequest(exit = stored)
+        )
+
+        // Store this one in place of the one you had.
+        val exit = checked.exit
+
+        when (val verdict = checked.verdict) {
+            is UnilateralExitVerdict.Valid -> {
+                for (tx in exit.transactions) {
+                    if (tx.status is ExitTransactionStatus.Ready) {
+                        // Log.v("Breez", "ready to broadcast: ${tx.txid}")
+                    }
+                }
+            }
+            is UnilateralExitVerdict.Done -> {
+                // Log.v("Breez", "The exit finished: ${exit.recoverableValueSat} sats recovered")
+            }
+            is UnilateralExitVerdict.Redo -> {
+                // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+                // back and the SDK follows them to whatever they have become.
+                // Log.v("Breez", "Build the exit again: ${verdict.reason}")
+            }
+        }
+        // ANCHOR_END: check-unilateral-exit
+    }
+
+    suspend fun syncExitData(sdk: BreezSdk) {
+        // ANCHOR: sync-exit-data
+        // With automatic collection off, an explicit sync is what collects the data
+        // a unilateral exit needs, and it waits for the collection to finish. Needs
+        // the Spark operators reachable, so run it on a schedule rather than at the
+        // moment an exit is needed.
+        sdk.syncWallet(SyncWalletRequest)
+        // ANCHOR_END: sync-exit-data
+    }
+
     // ANCHOR: custom-cpfp-signer
     class MyCpfpSigner : CpfpSigner {
         override suspend fun signPsbt(psbtBytes: ByteArray): ByteArray {

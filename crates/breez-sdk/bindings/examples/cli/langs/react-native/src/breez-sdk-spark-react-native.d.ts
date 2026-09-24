@@ -38,6 +38,9 @@ declare module '@breeztech/breez-sdk-spark-react-native' {
   export const ConversionOptions: any;
   export type ConversionOptions = any;
 
+  export const ChainApiType: any;
+  export type ChainApiType = any;
+
   export const ConversionType: any;
   export type ConversionType = any;
 
@@ -93,8 +96,10 @@ declare module '@breeztech/breez-sdk-spark-react-native' {
   export type CpfpInput = any;
   export const ExitLeafSelection: any;
   export type ExitLeafSelection = any;
-  export const ConfirmationStatus: any;
-  export type ConfirmationStatus = any;
+  export const ExitTransactionStatus_Tags: any;
+  export type ExitTransactionStatus = any;
+  export const UnilateralExitVerdict_Tags: any;
+  export type UnilateralExitVerdict = any;
 
   // --- proxy ---
   export type ProxyConfig = any;

@@ -1,0 +1,48 @@
+name: LNURL server CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lnurl-test:
+    name: LNURL server tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "30.2"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Installs the toolchain and components pinned in rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Setup rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt -p lnurl -- --check
+
+      - name: Run Clippy
+        run: |
+          cargo clippy -p lnurl --all-targets -- -D warnings
+          cargo clippy -p lnurl --all-targets --all-features -- -D warnings
+
+      # The tests start their own postgres through testcontainers, on the
+      # runner's Docker daemon.
+      - name: Run tests
+        run: make lnurl-test

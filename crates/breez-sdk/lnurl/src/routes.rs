@@ -21,6 +21,7 @@ use nostr::{Alphabet, Event, JsonUtil, Kind, TagStandard};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use spark::address::SparkAddress;
 use spark::utils::verify_signature::verify_signature_ecdsa;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -51,8 +52,11 @@ const DEFAULT_METADATA_OFFSET: u32 = 0;
 const DEFAULT_METADATA_LIMIT: u32 = 100;
 /// Maximum size (bytes) of a nostr event JSON (zap request or zap receipt).
 const MAX_NOSTR_EVENT_SIZE: usize = 32_768;
-/// Maximum length of a sender comment (LUD-12).
+/// Maximum length of a sender comment, in characters (LUD-12).
 const MAX_COMMENT_LENGTH: usize = 255;
+/// How long the readiness probe waits for the database. Well under the pool's
+/// own wait timeout, so a hung database fails the probe instead of stalling it.
+const READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Where `list_metadata` reads its credential from, in preference to the query
 /// string. A GET's query string lands in proxy and access logs; the response
 /// carries preimages.
@@ -112,6 +116,12 @@ pub struct PayResponse {
     #[serde(rename = "nostrPubkey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nostr_pubkey: Option<XOnlyPublicKey>,
+
+    /// Optional, the user's Spark address. A payer that supports it can
+    /// transfer on Spark directly instead of requesting an invoice.
+    #[serde(rename = "sparkAddress")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spark_address: Option<String>,
 }
 
 pub struct LnurlServer<DB> {
@@ -598,6 +608,10 @@ where
 
         let nostr_pubkey = user_nostr_pubkey(state.nostr_keys.as_ref(), &user.pubkey)?;
         let allows_nostr = nostr_pubkey.is_some().then_some(true);
+        let spark_address = state
+            .pay_response_spark_address
+            .then(|| spark_address_for(&user.pubkey, state.spark_config.network))
+            .flatten();
         Ok(Json(PayResponse {
             callback: format!(
                 "{}://{}/lnurlp/{}/invoice",
@@ -611,6 +625,7 @@ where
             comment_allowed: Some(MAX_COMMENT_LENGTH as u32),
             allows_nostr,
             nostr_pubkey,
+            spark_address,
         }))
     }
 
@@ -651,6 +666,17 @@ where
         }
 
         validate_amount_bounds(amount_msat, state.min_sendable, state.max_sendable)?;
+
+        // Rejected before the invoice is requested: an invoice costs a call to
+        // the service provider.
+        let comment = params
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        if comment.is_some_and(|c| c.chars().count() > MAX_COMMENT_LENGTH) {
+            return Err(lnurl_error("comment too long"));
+        }
 
         let zap_request = match &params.nostr {
             Some(event) => {
@@ -749,25 +775,19 @@ where
             }
         }
 
-        if let Some(comment) = params.comment {
-            let comment = comment.trim();
-            if comment.len() > MAX_COMMENT_LENGTH {
-                return Err(lnurl_error("comment too long"));
-            }
-            if !comment.is_empty()
-                && let Err(e) = state
-                    .db
-                    .insert_lnurl_sender_comment(&LnurlSenderComment {
-                        comment: comment.to_string(),
-                        payment_hash: payment_hash.clone(),
-                        user_pubkey: user.pubkey.clone(),
-                        updated_at,
-                    })
-                    .await
-            {
-                error!("Failed to insert lnurl sender comment: {:?}", e);
-                return Err(lnurl_error("internal server error"));
-            }
+        if let Some(comment) = comment
+            && let Err(e) = state
+                .db
+                .insert_lnurl_sender_comment(&LnurlSenderComment {
+                    comment: comment.to_string(),
+                    payment_hash: payment_hash.clone(),
+                    user_pubkey: user.pubkey.clone(),
+                    updated_at,
+                })
+                .await
+        {
+            error!("Failed to insert lnurl sender comment: {:?}", e);
+            return Err(lnurl_error("internal server error"));
         }
 
         // Store invoice for LUD-21 verify support and webhook delivery
@@ -792,6 +812,21 @@ where
             "routes": Vec::<String>::new(),
             "verify": verify_url,
         })))
+    }
+
+    /// Readiness probe: 200 while the database answers, 503 otherwise.
+    pub async fn ready(Extension(state): Extension<State<DB>>) -> StatusCode {
+        match tokio::time::timeout(READY_TIMEOUT, state.db.ping()).await {
+            Ok(Ok(())) => StatusCode::OK,
+            Ok(Err(e)) => {
+                warn!("readiness check failed: {e}");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Err(_) => {
+                warn!("readiness check timed out");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        }
     }
 
     /// LUD-21 verify endpoint
@@ -1887,6 +1922,20 @@ where
     ))
 }
 
+/// The Spark address of a registered pubkey, or `None` if the stored key
+/// does not encode. An unencodable key is logged and the lookup still
+/// succeeds without the field; a payer then falls back to the invoice.
+fn spark_address_for(pubkey: &str, network: spark::Network) -> Option<String> {
+    let pubkey = parse_pubkey(pubkey).ok()?;
+    match SparkAddress::new(pubkey, network, None).to_address_string() {
+        Ok(address) => Some(address),
+        Err(e) => {
+            error!("failed to encode spark address for {}: {}", pubkey, e);
+            None
+        }
+    }
+}
+
 fn parse_pubkey(pubkey: &str) -> Result<PublicKey, (StatusCode, Json<Value>)> {
     let pubkey = hex::decode(pubkey).map_err(|e| {
         trace!("invalid pubkey, could not decode: {}", e);
@@ -2008,13 +2057,27 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockRepository {
+        users: std::sync::Arc<Mutex<Vec<User>>>,
         invoices: std::sync::Arc<Mutex<HashMap<String, Invoice>>>,
         pending_zap_receipts: std::sync::Arc<Mutex<HashMap<String, PendingZapReceipt>>>,
         claimed_messages: ClaimedMessages,
+        unreachable: bool,
+        hangs: bool,
     }
 
     #[async_trait::async_trait]
     impl LnurlRepository for MockRepository {
+        async fn ping(&self) -> Result<(), LnurlRepositoryError> {
+            if self.hangs {
+                std::future::pending::<()>().await;
+            }
+            if self.unreachable {
+                return Err(LnurlRepositoryError::General(anyhow::anyhow!(
+                    "database unreachable"
+                )));
+            }
+            Ok(())
+        }
         async fn delete_user(
             &self,
             _: &str,
@@ -2049,10 +2112,21 @@ mod tests {
         }
         async fn get_user_by_name(
             &self,
-            _: &str,
-            _: &str,
+            domain: &str,
+            name: &str,
         ) -> Result<Option<User>, LnurlRepositoryError> {
-            Ok(None)
+            Ok(self
+                .users
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|u| u.domain == domain && u.name == name)
+                .map(|u| User {
+                    domain: u.domain.clone(),
+                    pubkey: u.pubkey.clone(),
+                    name: u.name.clone(),
+                    description: u.description.clone(),
+                }))
         }
         async fn get_user_by_pubkey(
             &self,
@@ -2325,7 +2399,269 @@ mod tests {
         repo
     }
 
+    // -- Handler state ---------------------------------------------------------
+
+    const HANDLER_TEST_DOMAIN: &str = "example.com";
+    const HANDLER_TEST_USERNAME: &str = "alice";
+
+    /// Service-provider transport that counts requests and fails each one, so
+    /// a test can tell whether a handler asked for an invoice.
+    #[derive(Default)]
+    struct CountingSspClient {
+        requests: AtomicU64,
+    }
+
+    impl CountingSspClient {
+        fn fail(&self) -> Result<platform_utils::HttpResponse, platform_utils::HttpError> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Err(platform_utils::HttpError::Timeout(
+                "test transport".to_string(),
+            ))
+        }
+
+        fn requests(&self) -> u64 {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl platform_utils::HttpClient for CountingSspClient {
+        async fn get(
+            &self,
+            _: String,
+            _: Option<HashMap<String, String>>,
+        ) -> Result<platform_utils::HttpResponse, platform_utils::HttpError> {
+            self.fail()
+        }
+        async fn post(
+            &self,
+            _: String,
+            _: Option<HashMap<String, String>>,
+            _: Option<String>,
+        ) -> Result<platform_utils::HttpResponse, platform_utils::HttpError> {
+            self.fail()
+        }
+        async fn delete(
+            &self,
+            _: String,
+            _: Option<HashMap<String, String>>,
+            _: Option<String>,
+        ) -> Result<platform_utils::HttpResponse, platform_utils::HttpError> {
+            self.fail()
+        }
+    }
+
+    fn repo_with_user() -> MockRepository {
+        let repo = MockRepository::default();
+        repo.users.lock().unwrap().push(User {
+            domain: HANDLER_TEST_DOMAIN.to_string(),
+            pubkey: SPARK_ADDRESS_TEST_PUBKEY.to_string(),
+            name: HANDLER_TEST_USERNAME.to_string(),
+            description: String::new(),
+        });
+        repo
+    }
+
+    /// A regtest server state whose service-provider traffic goes to `ssp`.
+    /// Operator connections are lazy, so building it touches no network.
+    async fn handler_state(
+        repo: MockRepository,
+        pay_response_spark_address: bool,
+        ssp: std::sync::Arc<CountingSspClient>,
+    ) -> State<MockRepository> {
+        use spark::operator::rpc::{ConnectionManager, DefaultConnectionManager};
+        use spark::session_store::InMemorySessionStore;
+        use spark::ssp::ServiceProvider;
+        use std::sync::Arc;
+
+        let network = spark_wallet::Network::Regtest;
+        let spark_config = spark_wallet::SparkWalletConfig::default_config(network);
+        let signer = Arc::new(spark_wallet::DefaultSigner::new(&[7u8; 32], network).unwrap());
+        let spark_signer: Arc<dyn spark_wallet::SparkSigner> =
+            Arc::new(spark_wallet::SparkSignerAdapter::new(signer.clone()));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let connection_manager: Arc<dyn ConnectionManager> =
+            Arc::new(DefaultConnectionManager::new());
+        let ssp_http_client: Arc<dyn platform_utils::HttpClient> = ssp;
+        let service_provider = Arc::new(ServiceProvider::new_with_client(
+            spark_config.service_provider_config.clone(),
+            spark_signer.clone(),
+            session_store.clone(),
+            None,
+            Arc::clone(&ssp_http_client),
+        ));
+        let wallet = spark_wallet::SparkWallet::new(
+            spark_config.clone(),
+            spark_signer,
+            session_store.clone(),
+            Arc::new(spark::tree::InMemoryTreeStore::default()),
+            Arc::new(spark::token::InMemoryTokenOutputStore::default()),
+            Arc::clone(&connection_manager),
+            Some(Arc::clone(&ssp_http_client)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        State {
+            db: repo.clone(),
+            webhook_service: crate::webhooks::WebhookService::new(repo),
+            wallet: Arc::new(wallet),
+            is_mainnet: false,
+            scheme: "https".to_string(),
+            min_sendable: 1000,
+            max_sendable: 4_000_000_000,
+            pay_response_spark_address,
+            include_spark_address: false,
+            registration_limit: None,
+            domains: Arc::new(tokio::sync::RwLock::new(HashMap::from([(
+                HANDLER_TEST_DOMAIN.to_string(),
+                None,
+            )]))),
+            nostr_keys: None,
+            ca_cert: None,
+            crl_url: None,
+            crl: std::collections::HashSet::new(),
+            connection_manager,
+            coordinator: spark_config.operator_pool.get_coordinator().clone(),
+            signer,
+            session_store,
+            service_provider,
+            spark_config,
+            ssp_http_client,
+            jwt_cache: None,
+            subscribed_keys: Arc::default(),
+            invoice_paid_trigger: watch::channel(()).0,
+            webhook_secret: TEST_WEBHOOK_SECRET.to_string(),
+        }
+    }
+
+    async fn request_invoice(
+        state: State<MockRepository>,
+        comment: Option<String>,
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        LnurlServer::<MockRepository>::handle_invoice(
+            Host(HANDLER_TEST_DOMAIN.to_string()),
+            Path(HANDLER_TEST_USERNAME.to_string()),
+            Query(LnurlPayCallbackParams {
+                amount: Some(10_000),
+                comment,
+                nostr: None,
+                expiry: None,
+            }),
+            Extension(state),
+        )
+        .await
+    }
+
     // -- Tests -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ready_is_ok_while_the_database_answers() {
+        let state = handler_state(
+            MockRepository::default(),
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_is_unavailable_while_the_database_errors() {
+        let repo = MockRepository {
+            unreachable: true,
+            ..MockRepository::default()
+        };
+        let state = handler_state(
+            repo,
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn ready_is_unavailable_while_the_database_hangs() {
+        let repo = MockRepository {
+            hangs: true,
+            ..MockRepository::default()
+        };
+        let state = handler_state(
+            repo,
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn invoice_rejects_an_overlong_comment_before_requesting_an_invoice() {
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("a".repeat(MAX_COMMENT_LENGTH + 1)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "comment too long");
+        assert_eq!(ssp.requests(), 0, "no invoice may be requested");
+    }
+
+    #[tokio::test]
+    async fn invoice_with_a_valid_comment_requests_an_invoice() {
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("a".repeat(MAX_COMMENT_LENGTH)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "failed to create invoice");
+        assert!(ssp.requests() > 0, "an invoice must be requested");
+    }
+
+    #[tokio::test]
+    async fn invoice_counts_the_comment_limit_in_characters() {
+        // 4 bytes per character: a byte count would refuse this at a quarter
+        // of the advertised `commentAllowed`.
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("😀".repeat(MAX_COMMENT_LENGTH)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "failed to create invoice");
+        assert!(ssp.requests() > 0, "an invoice must be requested");
+    }
+
+    #[tokio::test]
+    async fn invoice_rejects_a_multibyte_comment_one_character_over_the_limit() {
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("ü".repeat(MAX_COMMENT_LENGTH + 1)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "comment too long");
+        assert_eq!(ssp.requests(), 0, "no invoice may be requested");
+    }
 
     #[tokio::test]
     async fn webhook_valid_payment_marks_invoice_paid() {
@@ -3940,5 +4276,92 @@ mod tests {
                 "{lnurl} should not address alice@example.com"
             );
         }
+    }
+
+    // The secp256k1 generator point, compressed: a valid key that belongs to nobody.
+    const SPARK_ADDRESS_TEST_PUBKEY: &str =
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    #[test]
+    fn spark_address_for_encodes_the_registered_pubkey() {
+        let address = spark_address_for(SPARK_ADDRESS_TEST_PUBKEY, spark::Network::Mainnet)
+            .expect("a valid pubkey encodes");
+        assert!(address.starts_with("spark1"), "{address}");
+
+        let decoded = SparkAddress::from_str(&address).expect("the address parses back");
+        assert_eq!(
+            decoded.identity_public_key.to_string(),
+            SPARK_ADDRESS_TEST_PUBKEY
+        );
+        assert_eq!(decoded.network, spark::Network::Mainnet);
+        assert!(!decoded.is_invoice());
+    }
+
+    #[test]
+    fn spark_address_for_uses_the_network_prefix() {
+        let address = spark_address_for(SPARK_ADDRESS_TEST_PUBKEY, spark::Network::Regtest)
+            .expect("a valid pubkey encodes");
+        assert!(address.starts_with("sparkrt1"), "{address}");
+    }
+
+    #[test]
+    fn spark_address_for_returns_none_for_an_unparseable_pubkey() {
+        assert_eq!(
+            spark_address_for("not-a-pubkey", spark::Network::Mainnet),
+            None
+        );
+        assert_eq!(spark_address_for("02abc123", spark::Network::Mainnet), None);
+    }
+
+    async fn pay_response_json(pay_response_spark_address: bool) -> Value {
+        let state = handler_state(
+            repo_with_user(),
+            pay_response_spark_address,
+            std::sync::Arc::default(),
+        )
+        .await;
+        let Json(response) = LnurlServer::<MockRepository>::handle_lnurl_pay(
+            Host(HANDLER_TEST_DOMAIN.to_string()),
+            Path(HANDLER_TEST_USERNAME.to_string()),
+            Extension(state),
+        )
+        .await
+        .unwrap();
+        serde_json::to_value(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pay_handler_omits_spark_address_when_flag_is_off() {
+        let json = pay_response_json(false).await;
+        assert!(json.get("sparkAddress").is_none(), "{json}");
+    }
+
+    #[tokio::test]
+    async fn pay_handler_carries_spark_address_when_flag_is_on() {
+        let json = pay_response_json(true).await;
+        let expected = spark_address_for(SPARK_ADDRESS_TEST_PUBKEY, spark::Network::Regtest)
+            .expect("a valid pubkey encodes");
+        assert_eq!(json["sparkAddress"], expected, "{json}");
+    }
+
+    #[test]
+    fn pay_response_carries_spark_address_only_when_set() {
+        let mut response = PayResponse {
+            callback: "https://example.com/lnurlp/alice/invoice".to_string(),
+            max_sendable: 4_000_000_000,
+            min_sendable: 1000,
+            tag: Tag::Pay,
+            metadata: String::new(),
+            comment_allowed: None,
+            allows_nostr: None,
+            nostr_pubkey: None,
+            spark_address: None,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("sparkAddress").is_none(), "{json}");
+
+        response.spark_address = Some("spark1example".to_string());
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["sparkAddress"], "spark1example");
     }
 }

@@ -47,6 +47,32 @@ Future<void> buildExit(BreezSdk sdk, PrepareUnilateralExitResponse quote) async 
   // ANCHOR_END: unilateral-exit
 }
 
+Future<void> checkExit(BreezSdk sdk, UnilateralExitResponse stored) async {
+  // ANCHOR: check-unilateral-exit
+  CheckUnilateralExitResponse checked = await sdk.checkUnilateralExit(
+    request: CheckUnilateralExitRequest(exit: stored),
+  );
+
+  // Store this one in place of the one you had.
+  UnilateralExitResponse exit = checked.exit;
+
+  UnilateralExitVerdict verdict = checked.verdict;
+  if (verdict is UnilateralExitVerdict_Valid) {
+    for (UnilateralExitTransaction tx in exit.transactions) {
+      if (tx.status is ExitTransactionStatus_Ready) {
+        print("ready to broadcast: ${tx.txid}");
+      }
+    }
+  } else if (verdict is UnilateralExitVerdict_Done) {
+    print("The exit finished: ${exit.recoverableValueSat} sats recovered");
+  } else if (verdict is UnilateralExitVerdict_Redo) {
+    // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+    // back and the SDK follows them to whatever they have become.
+    print("Build the exit again: ${verdict.reason}");
+  }
+  // ANCHOR_END: check-unilateral-exit
+}
+
 Future<String> exportExitState(BreezSdk sdk) async {
   // ANCHOR: export-unilateral-exit-state
   ExportUnilateralExitStateResponse exported = await sdk.exportUnilateralExitState();
@@ -66,6 +92,16 @@ Future<void> importExitState(BreezSdk sdk, String exitState) async {
 
   print("Imported ${imported.importedLeaves} leaves, skipped ${imported.skippedForeignLeaves}");
   // ANCHOR_END: import-unilateral-exit-state
+}
+
+Future<void> syncExitData(BreezSdk sdk) async {
+  // ANCHOR: sync-exit-data
+  // With automatic collection off, an explicit sync is what collects the data
+  // a unilateral exit needs, and it waits for the collection to finish. Needs
+  // the Spark operators reachable, so run it on a schedule rather than at the
+  // moment an exit is needed.
+  await sdk.syncWallet(request: SyncWalletRequest());
+  // ANCHOR_END: sync-exit-data
 }
 
 // ANCHOR: custom-cpfp-signer

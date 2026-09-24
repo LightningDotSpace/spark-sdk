@@ -1,7 +1,8 @@
 import type {
   BreezSdk,
   CpfpSigner,
-  PrepareUnilateralExitResponse
+  PrepareUnilateralExitResponse,
+  UnilateralExitResponse
 } from '@breeztech/breez-sdk-spark'
 import { singleKeyCpfpSigner } from '@breeztech/breez-sdk-spark'
 
@@ -47,6 +48,36 @@ const exampleBuildExit = async (sdk: BreezSdk, quote: PrepareUnilateralExitRespo
   // ANCHOR_END: unilateral-exit
 }
 
+const exampleCheckExit = async (sdk: BreezSdk, stored: UnilateralExitResponse) => {
+  // ANCHOR: check-unilateral-exit
+  const checked = await sdk.checkUnilateralExit({ exit: stored })
+
+  // Store this one in place of the one you had.
+  const exit = checked.exit
+
+  switch (checked.verdict.type) {
+    case 'valid': {
+      for (const tx of exit.transactions) {
+        if (tx.status.type === 'ready') {
+          console.log(`ready to broadcast: ${tx.txid}`)
+        }
+      }
+      break
+    }
+    case 'done': {
+      console.log(`The exit finished: ${exit.recoverableValueSat} sats recovered`)
+      break
+    }
+    case 'redo': {
+      // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+      // back and the SDK follows them to whatever they have become.
+      console.log(`Build the exit again: ${checked.verdict.reason}`)
+      break
+    }
+  }
+  // ANCHOR_END: check-unilateral-exit
+}
+
 const exampleExportExitState = async (sdk: BreezSdk): Promise<string> => {
   // ANCHOR: export-unilateral-exit-state
   const exported = await sdk.exportUnilateralExitState()
@@ -63,6 +94,16 @@ const exampleImportExitState = async (sdk: BreezSdk, exitState: string) => {
 
   console.log(`Imported ${imported.importedLeaves} leaves, skipped ${imported.skippedForeignLeaves}`)
   // ANCHOR_END: import-unilateral-exit-state
+}
+
+const exampleSyncExitData = async (sdk: BreezSdk) => {
+  // ANCHOR: sync-exit-data
+  // With automatic collection off, an explicit sync is what collects the data
+  // a unilateral exit needs, and it waits for the collection to finish. Needs
+  // the Spark operators reachable, so run it on a schedule rather than at the
+  // moment an exit is needed.
+  await sdk.syncWallet({})
+  // ANCHOR_END: sync-exit-data
 }
 
 // ANCHOR: custom-cpfp-signer

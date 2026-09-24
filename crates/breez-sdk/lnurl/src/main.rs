@@ -1,3 +1,8 @@
+// The root clippy.toml bans direct reqwest clients so every SDK connection can
+// honour `Config.proxy`. This is the LNURL server, not the SDK: it has no such
+// config, and its clients are server-side.
+#![allow(clippy::disallowed_methods)]
+
 use crate::{
     partner_jwt::{JwtCache, JwtStore, RepoJwtStore},
     repository::LnurlRepository,
@@ -24,8 +29,8 @@ use spark::session_store::InMemorySessionStore;
 use spark::ssp::{ServiceProvider, SparkWalletWebhookEventType};
 use spark::token::InMemoryTokenOutputStore;
 use spark::tree::InMemoryTreeStore;
+use spark_postgres::{PostgresStorageConfig, create_pool};
 use spark_wallet::{DefaultSigner, Network, SparkSignerAdapter, SparkWalletConfig};
-use sqlx::PgPool;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::{path::PathBuf, sync::Arc};
@@ -55,6 +60,14 @@ mod zap;
 fn default_user_agent() -> String {
     concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")).to_string()
 }
+
+/// How long establishing a new database connection may take.
+const DB_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// How long a request may wait for a pooled connection before giving up. Longer
+/// than the connect timeout so a request queued behind a saturated pool still
+/// gets a chance at a freshly opened connection.
+const DB_POOL_WAIT_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Clone, Parser, Debug, Serialize, Deserialize)]
 #[command(version, about, long_about = None)]
@@ -95,6 +108,13 @@ struct Args {
     /// Maximum amount (in millisatoshi) that can be sent in a lnurl payment.
     #[arg(long, default_value = "4000000000")]
     pub max_sendable: u64,
+
+    /// Include the user's Spark address (`sparkAddress`) in the LNURL-pay
+    /// response. Payers that support it can then transfer on Spark instead
+    /// of paying over Lightning, at the cost of publishing which Spark
+    /// address is behind a name. Invoices are not affected.
+    #[arg(long, default_value = "false")]
+    pub pay_response_spark_address: bool,
 
     /// Maximum successful address registrations one pubkey may perform per
     /// domain in a rolling 24h window. 0 disables the limit.
@@ -215,9 +235,21 @@ async fn main() -> Result<(), anyhow::Error> {
         ));
     }
 
-    let pool = PgPool::connect(&args.db_url)
-        .await
-        .map_err(|e| anyhow!("failed to create connection pool: {:?}", e))?;
+    let mut pool_config = PostgresStorageConfig::with_defaults(args.db_url.clone());
+    // deadpool defaults both timeouts to "wait forever", which turns an
+    // unreachable database into a hung process rather than a failed request.
+    pool_config.create_timeout_secs = Some(DB_CONNECT_TIMEOUT_SECS);
+    pool_config.wait_timeout_secs = Some(DB_POOL_WAIT_TIMEOUT_SECS);
+    let pool = create_pool(&pool_config)
+        .map_err(|e| anyhow!("failed to create connection pool: {e:?}"))?;
+
+    // The pool connects lazily, so an unreachable database or bad credentials
+    // would otherwise only surface once requests start arriving.
+    drop(
+        pool.get()
+            .await
+            .map_err(|e| anyhow!("failed to connect to the database: {e:?}"))?,
+    );
 
     if args.auto_migrate {
         debug!("running database migrations");
@@ -378,7 +410,7 @@ where
         .map(|ca_cert_str| {
             let raw_ca = BASE64_STANDARD
                 .decode(ca_cert_str.trim())
-                .map_err(|e| anyhow!("failed to decode base64 ca_cert: {:?}", e))?;
+                .map_err(|e| anyhow!("failed to decode base64 ca_cert: {e:?}"))?;
             let (_, ca_cert) = X509Certificate::from_der(&raw_ca)
                 .map_err(|e| anyhow!("failed to parse ca certificate: {e:?}"))?;
             Ok::<_, anyhow::Error>(ca_cert.as_raw().to_vec())
@@ -394,7 +426,7 @@ where
         .nsec
         .map(|nsec| {
             let keys = nostr::Keys::from_str(&nsec)
-                .map_err(|e| anyhow!("failed to parse nsec key: {:?}", e))?;
+                .map_err(|e| anyhow!("failed to parse nsec key: {e:?}"))?;
             Ok::<_, anyhow::Error>(keys)
         })
         .transpose()?;
@@ -457,6 +489,7 @@ where
         scheme: args.scheme,
         min_sendable: args.min_sendable,
         max_sendable: args.max_sendable,
+        pay_response_spark_address: args.pay_response_spark_address,
         registration_limit,
         include_spark_address: {
             #[cfg(feature = "dev")]
@@ -528,6 +561,7 @@ where
         .route("/verify/{payment_hash}", get(LnurlServer::<DB>::verify))
         .route("/webhook", post(LnurlServer::<DB>::webhook))
         .route("/health", get(|| async { StatusCode::OK }))
+        .route("/ready", get(LnurlServer::<DB>::ready))
         .layer(Extension(state))
         .layer(
             CorsLayer::new()
@@ -540,11 +574,7 @@ where
     let listener = tokio::net::TcpListener::bind(args.address).await?;
     let server = axum::serve(listener, server_router.into_make_service());
 
-    let graceful = server.with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to create Ctrl+C shutdown signal");
-    });
+    let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     // Await the server to receive the shutdown signal
     if let Err(e) = graceful.await {
@@ -553,6 +583,30 @@ where
 
     info!("lnurl server stopped");
     Ok(())
+}
+
+/// Resolves on Ctrl+C or, on unix, SIGTERM (what `docker stop` sends).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to create Ctrl+C shutdown signal");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to create SIGTERM shutdown signal")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }
 
 fn register_webhook(service_provider: Arc<ServiceProvider>, webhook_url: String, secret: String) {

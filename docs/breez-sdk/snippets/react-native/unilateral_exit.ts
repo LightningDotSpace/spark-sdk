@@ -1,12 +1,15 @@
 import type {
   BreezSdk,
-  PrepareUnilateralExitResponse
+  PrepareUnilateralExitResponse,
+  UnilateralExitResponse
 } from '@breeztech/breez-sdk-spark-react-native'
 import {
   singleKeyCpfpSigner,
   CpfpFundingKind,
   CpfpInput,
-  ExitLeafSelection
+  ExitLeafSelection,
+  ExitTransactionStatus_Tags,
+  UnilateralExitVerdict_Tags
 } from '@breeztech/breez-sdk-spark-react-native'
 
 const exampleQuoteExit = async (sdk: BreezSdk): Promise<PrepareUnilateralExitResponse> => {
@@ -58,6 +61,35 @@ const exampleBuildExit = async (sdk: BreezSdk, quote: PrepareUnilateralExitRespo
   // ANCHOR_END: unilateral-exit
 }
 
+const exampleCheckExit = async (sdk: BreezSdk, stored: UnilateralExitResponse) => {
+  // ANCHOR: check-unilateral-exit
+  const checked = await sdk.checkUnilateralExit({ exit: stored })
+
+  // Store this one in place of the one you had.
+  const exit = checked.exit
+
+  switch (checked.verdict.tag) {
+    case UnilateralExitVerdict_Tags.Valid:
+      for (const tx of exit.transactions) {
+        if (tx.status.tag === ExitTransactionStatus_Tags.Ready) {
+          console.log(`ready to broadcast: ${tx.txid}`)
+        }
+      }
+      break
+    case UnilateralExitVerdict_Tags.Done:
+      console.log(`The exit finished: ${exit.recoverableValueSat} sats recovered`)
+      break
+    case UnilateralExitVerdict_Tags.Redo: {
+      // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+      // back and the SDK follows them to whatever they have become.
+      const { reason } = checked.verdict.inner
+      console.log(`Build the exit again: ${reason}`)
+      break
+    }
+  }
+  // ANCHOR_END: check-unilateral-exit
+}
+
 const exampleExportExitState = async (sdk: BreezSdk): Promise<string> => {
   // ANCHOR: export-unilateral-exit-state
   const exported = await sdk.exportUnilateralExitState()
@@ -75,6 +107,16 @@ const exampleImportExitState = async (sdk: BreezSdk, exitState: string) => {
 
   console.log(`Imported ${imported.importedLeaves} leaves, skipped ${imported.skippedForeignLeaves}`)
   // ANCHOR_END: import-unilateral-exit-state
+}
+
+const exampleSyncExitData = async (sdk: BreezSdk) => {
+  // ANCHOR: sync-exit-data
+  // With automatic collection off, an explicit sync is what collects the data
+  // a unilateral exit needs, and it waits for the collection to finish. Needs
+  // the Spark operators reachable, so run it on a schedule rather than at the
+  // moment an exit is needed.
+  await sdk.syncWallet({})
+  // ANCHOR_END: sync-exit-data
 }
 
 // ANCHOR: custom-cpfp-signer

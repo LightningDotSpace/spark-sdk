@@ -54,6 +54,40 @@ namespace BreezSdkSnippets
             // ANCHOR_END: unilateral-exit
         }
 
+        async Task CheckExit(BreezSdk sdk, UnilateralExitResponse stored)
+        {
+            // ANCHOR: check-unilateral-exit
+            var checkedExit = await sdk.CheckUnilateralExit(
+                request: new CheckUnilateralExitRequest(exit: stored)
+            );
+
+            // Store this one in place of the one you had.
+            var exit = checkedExit.exit;
+
+            switch (checkedExit.verdict)
+            {
+                case UnilateralExitVerdict.Valid:
+                    foreach (var tx in exit.transactions)
+                    {
+                        if (tx.status is ExitTransactionStatus.Ready)
+                        {
+                            Console.WriteLine($"ready to broadcast: {tx.txid}");
+                        }
+                    }
+                    break;
+                case UnilateralExitVerdict.Done:
+                    Console.WriteLine(
+                        $"The exit finished: {exit.recoverableValueSat} sats recovered");
+                    break;
+                case UnilateralExitVerdict.Redo { reason: var reason }:
+                    // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+                    // back and the SDK follows them to whatever they have become.
+                    Console.WriteLine($"Build the exit again: {reason}");
+                    break;
+            }
+            // ANCHOR_END: check-unilateral-exit
+        }
+
         async Task<string> ExportExitState(BreezSdk sdk)
         {
             // ANCHOR: export-unilateral-exit-state
@@ -75,6 +109,17 @@ namespace BreezSdkSnippets
             Console.WriteLine($"Imported {imported.importedLeaves} leaves, " +
                 $"skipped {imported.skippedForeignLeaves}");
             // ANCHOR_END: import-unilateral-exit-state
+        }
+
+        async Task SyncExitData(BreezSdk sdk)
+        {
+            // ANCHOR: sync-exit-data
+            // With automatic collection off, an explicit sync is what collects the data
+            // a unilateral exit needs, and it waits for the collection to finish. Needs
+            // the Spark operators reachable, so run it on a schedule rather than at the
+            // moment an exit is needed.
+            await sdk.SyncWallet(request: new SyncWalletRequest());
+            // ANCHOR_END: sync-exit-data
         }
 
         // ANCHOR: custom-cpfp-signer

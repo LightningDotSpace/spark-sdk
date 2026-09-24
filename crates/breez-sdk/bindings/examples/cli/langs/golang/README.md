@@ -52,7 +52,10 @@ make clean            Remove binary
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-d`, `--data-dir` | `./.data` | Path to the data directory |
-| `--network` | `regtest` | Network to use (`regtest` or `mainnet`) |
+| `--network` | `regtest` | Network to use (`regtest`, `signet`, or `mainnet`) |
+| `--spark-config` | - | JSON file with Spark operators and SSP configuration (required for signet) |
+| `--chain-api-url` | - | Chain API base URL (required for signet) |
+| `--chain-api-type` | `esplora` | Chain API type: `esplora` or `mempool-space` (requires `--chain-api-url`) |
 | `--account-number` | - | Account number for the Spark signer |
 | `--postgres-connection-string` | - | PostgreSQL connection string (uses SQLite by default) |
 | `--mysql-connection-string` | - | MySQL connection string (uses SQLite by default) |
@@ -96,7 +99,7 @@ Once inside the REPL, type `help` to see all commands. The CLI supports:
 
 **Stable Balance**: `stable-balance get`, `stable-balance set`, `stable-balance unset`
 
-**Advanced**: `advanced unilateral-exit` (expert-only, builds raw exit transactions)
+**Advanced**: `advanced unilateral-exit`, `advanced check-unilateral-exit`, `advanced export-unilateral-exit-state`, `advanced import-unilateral-exit-state` (expert-only)
 
 **Other**: `parse`, `list-fiat-currencies`, `list-fiat-rates`, `get-user-settings`, `set-user-settings`, `get-spark-status`
 

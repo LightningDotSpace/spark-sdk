@@ -34,8 +34,9 @@ pub use chain::{
 pub use common::rest::{RestClient, RestResponse};
 pub use common::{fiat::*, models::*, sync_storage};
 pub use cross_chain::{
-    CrossChainFeeMode, CrossChainProvider, CrossChainProviderContext, CrossChainReceiveInfo,
-    CrossChainRouteFilter, CrossChainRoutePair, DeliveryMethod, SparkAsset,
+    CrossChainAcceptedAsset, CrossChainFeeMode, CrossChainProvider, CrossChainProviderContext,
+    CrossChainReceiveInfo, CrossChainRouteFilter, CrossChainRouteLimits, CrossChainRoutePair,
+    DeliveryMethod, SparkAsset,
 };
 pub use error::{DepositClaimError, SdkError, SignerError};
 pub use events::{AutoOptimizationEvent, EventEmitter, EventListener, SdkEvent};
@@ -45,7 +46,7 @@ pub use models::*;
 pub use persist::{
     ConversionFilter, PaymentMetadata, SetLnurlMetadataItem, Storage, StorageError,
     StorageListPaymentsRequest, StoragePaymentDetailsFilter, StoredCrossChainSwap,
-    UpdateDepositPayload,
+    UpdateDepositPayload, UpdateWatchedAddressPayload, WatchedDepositAddress,
     backend::{
         PrebuiltBackend, ResolvedStores, StorageBackend, custom_storage, default_session_store,
     },

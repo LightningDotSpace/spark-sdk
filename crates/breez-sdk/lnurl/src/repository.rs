@@ -153,6 +153,8 @@ pub struct TransferRequest<'a> {
 
 #[async_trait::async_trait]
 pub trait LnurlRepository {
+    /// Run a trivial query, to tell whether the database is reachable.
+    async fn ping(&self) -> Result<(), LnurlRepositoryError>;
     /// Delete `pubkey`'s row in `domain`, but only while it still holds `name`,
     /// and hold `name` for it. Returns whether a row was removed.
     ///
@@ -341,9 +343,7 @@ pub struct WebhookPayloadData {
 }
 
 /// Tests for the domain-attribution repository methods, generic over the
-/// `LnurlRepository` implementation. Assertions look up domains by name rather
-/// than by count, so they tolerate a shared test database with rows from other
-/// tests.
+/// `LnurlRepository` implementation.
 #[cfg(test)]
 pub mod shared_tests {
     use super::{

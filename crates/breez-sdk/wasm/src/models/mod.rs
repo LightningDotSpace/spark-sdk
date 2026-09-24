@@ -231,6 +231,7 @@ pub enum InstantClaimStatus {
     Submitted {
         claim_id: String,
     },
+    Claimed,
 }
 
 #[macros::extern_wasm_bindgen(breez_sdk_spark::InputType)]
@@ -258,6 +259,8 @@ pub struct CrossChainAddressDetails {
     pub address_family: CrossChainAddressFamily,
     pub contract_address: Option<String>,
     pub chain_id: Option<u64>,
+    #[tsify(type = "string")]
+    #[serde(default, with = "serde_option_u128_as_string")]
     pub amount: Option<u128>,
 }
 
@@ -690,6 +693,7 @@ pub struct LnurlWithdrawInfo {
 pub enum Network {
     Mainnet,
     Regtest,
+    Signet,
 }
 
 impl std::fmt::Display for Network {
@@ -697,6 +701,7 @@ impl std::fmt::Display for Network {
         match self {
             Network::Mainnet => write!(f, "Mainnet"),
             Network::Regtest => write!(f, "Regtest"),
+            Network::Signet => write!(f, "Signet"),
         }
     }
 }
@@ -868,10 +873,12 @@ pub enum UnilateralExitTxKind {
     Sweep,
 }
 
-#[macros::extern_wasm_bindgen(breez_sdk_spark::ConfirmationStatus)]
-pub enum ConfirmationStatus {
-    Confirmed,
-    Unconfirmed,
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ExitTransactionStatus)]
+pub enum ExitTransactionStatus {
+    Confirmed { block_height: Option<u32> },
+    Ready,
+    WaitingForDependencies,
+    WaitingForTimelock { spendable_at_height: Option<u32> },
     Unverified,
 }
 
@@ -884,7 +891,7 @@ pub struct UnilateralExitTransaction {
     pub cpfp_tx_hex: Option<String>,
     pub csv_timelock_blocks: Option<u32>,
     pub depends_on: Vec<String>,
-    pub status: ConfirmationStatus,
+    pub status: ExitTransactionStatus,
 }
 
 #[macros::extern_wasm_bindgen(breez_sdk_spark::UnilateralExitLeaf)]
@@ -907,16 +914,58 @@ pub struct PrepareUnilateralExitRequest {
     pub selection: ExitLeafSelection,
 }
 
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ExitChainState)]
+pub struct ExitChainState {
+    pub confirmed_nodes: Vec<ConfirmedExitNode>,
+    pub refunds: Vec<ExitRefund>,
+    pub stopped_leaf_ids: Vec<String>,
+    pub unverified_node_ids: Vec<String>,
+    pub unverifiable_confirmed_node_ids: Vec<String>,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ConfirmedExitNode)]
+pub struct ConfirmedExitNode {
+    pub node_id: String,
+    pub confirmed_by: ExitNodeConfirmation,
+    pub block_height: Option<u32>,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ExitNodeConfirmation)]
+pub enum ExitNodeConfirmation {
+    Cpfp,
+    Direct,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ExitRefund)]
+pub struct ExitRefund {
+    pub leaf_id: String,
+    pub state: ExitRefundState,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::ExitRefundState)]
+pub enum ExitRefundState {
+    OnChain {
+        tx_hex: String,
+        vout: u32,
+        value_sat: u64,
+        block_height: Option<u32>,
+    },
+    Swept,
+}
+
 #[macros::extern_wasm_bindgen(breez_sdk_spark::PrepareUnilateralExitResponse)]
 pub struct PrepareUnilateralExitResponse {
     pub leaves: Vec<UnilateralExitLeaf>,
     pub recoverable_value_sat: u64,
     pub total_fee_sat: u64,
+    pub cpfp_fee_sat: u64,
     pub fanout_fee_sat: u64,
+    pub sweep_fee_sat: u64,
     pub single_utxo_funding_sat: u64,
     pub per_branch_funding: Vec<PerBranchFunding>,
     pub fee_rate_sat_per_vbyte: u64,
     pub destination: String,
+    pub exit_chain_state: ExitChainState,
 }
 
 #[macros::extern_wasm_bindgen(breez_sdk_spark::UnilateralExitRequest)]
@@ -925,12 +974,39 @@ pub struct UnilateralExitRequest {
     pub funding_inputs: Vec<CpfpInput>,
 }
 
+#[macros::extern_wasm_bindgen(breez_sdk_spark::CheckUnilateralExitRequest)]
+pub struct CheckUnilateralExitRequest {
+    pub exit: UnilateralExitResponse,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::CheckUnilateralExitResponse)]
+pub struct CheckUnilateralExitResponse {
+    pub exit: UnilateralExitResponse,
+    pub verdict: UnilateralExitVerdict,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::UnilateralExitVerdict)]
+pub enum UnilateralExitVerdict {
+    Valid,
+    Done,
+    Redo { reason: UnilateralExitRedoReason },
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::UnilateralExitRedoReason)]
+pub enum UnilateralExitRedoReason {
+    OnChainStateDiverged,
+}
+
 #[macros::extern_wasm_bindgen(breez_sdk_spark::UnilateralExitResponse)]
 pub struct UnilateralExitResponse {
     pub recoverable_value_sat: u64,
     pub total_fee_sat: u64,
+    pub cpfp_fee_sat: u64,
+    pub fanout_fee_sat: u64,
+    pub sweep_fee_sat: u64,
     pub leaves: Vec<UnilateralExitLeaf>,
     pub transactions: Vec<UnilateralExitTransaction>,
+    pub funding_inputs: Vec<CpfpInput>,
 }
 
 #[macros::extern_wasm_bindgen(breez_sdk_spark::ExportUnilateralExitStateResponse)]
@@ -1080,6 +1156,24 @@ pub enum SparkAsset {
     Token { token_identifier: String },
 }
 
+#[macros::extern_wasm_bindgen(breez_sdk_spark::CrossChainRouteLimits)]
+pub struct CrossChainRouteLimits {
+    #[tsify(type = "string")]
+    #[serde(default, with = "serde_option_u128_as_string")]
+    pub min_amount: Option<u128>,
+    #[tsify(type = "string")]
+    #[serde(default, with = "serde_option_u128_as_string")]
+    pub max_amount: Option<u128>,
+    pub min_usd_cents: Option<u64>,
+    pub max_usd_cents: Option<u64>,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::CrossChainAcceptedAsset)]
+pub struct CrossChainAcceptedAsset {
+    pub asset: SparkAsset,
+    pub limits: Option<CrossChainRouteLimits>,
+}
+
 #[macros::extern_wasm_bindgen(breez_sdk_spark::DeliveryMethod)]
 pub enum DeliveryMethod {
     Spark,
@@ -1103,7 +1197,7 @@ pub struct CrossChainRoutePair {
     pub contract_address: Option<String>,
     pub decimals: u8,
     pub exact_out_eligible: bool,
-    pub accepted_assets: Vec<SparkAsset>,
+    pub accepted_assets: Vec<CrossChainAcceptedAsset>,
     pub delivery_methods: Vec<DeliveryMethod>,
 }
 
@@ -1471,6 +1565,8 @@ pub struct ResolvedBatchRecipient {
 #[macros::extern_wasm_bindgen(breez_sdk_spark::BatchTotal)]
 pub struct BatchTotal {
     pub token_identifier: Option<String>,
+    #[tsify(type = "string")]
+    #[serde(with = "serde_u128_as_string")]
     pub amount: u128,
 }
 
@@ -1641,6 +1737,20 @@ pub enum UpdateDepositPayload {
         refund_txid: String,
         state: RefundState,
     },
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::WatchedDepositAddress)]
+pub struct WatchedDepositAddress {
+    pub address: String,
+    pub issued_at: u64,
+    pub seen: bool,
+}
+
+#[macros::extern_wasm_bindgen(breez_sdk_spark::UpdateWatchedAddressPayload)]
+pub enum UpdateWatchedAddressPayload {
+    Watch { issued_at: u64 },
+    Seen,
+    Unwatch { issued_at: u64 },
 }
 
 #[macros::extern_wasm_bindgen(breez_sdk_spark::CheckLightningAddressRequest)]
@@ -2206,3 +2316,6 @@ pub struct RegisterWebhookResponse {
 pub struct UnregisterWebhookRequest {
     pub webhook_id: String,
 }
+
+#[cfg(test)]
+mod tests;

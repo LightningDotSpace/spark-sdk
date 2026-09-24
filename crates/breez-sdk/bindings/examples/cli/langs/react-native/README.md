@@ -92,7 +92,7 @@ Once the app is running, type commands in the text input at the bottom:
 
 **Webhooks**: `webhooks <subcommand>`
 
-**Advanced**: `advanced unilateral-exit`, `advanced export-unilateral-exit-state`, `advanced import-unilateral-exit-state`
+**Advanced**: `advanced unilateral-exit`, `advanced check-unilateral-exit`, `advanced export-unilateral-exit-state`, `advanced import-unilateral-exit-state`
 
 **Other**: `parse`, `list-fiat-currencies`, `list-fiat-rates`, `get-user-settings`, `set-user-settings`, `get-spark-status`
 
@@ -103,6 +103,20 @@ Type `help` for a full list of commands. Each command mirrors the Rust CLI behav
 The setup screen includes a Client/Server mode toggle. Server mode uses `defaultServerConfig`
 which disables background tasks (periodic sync, real-time sync client, optimizers).
 Run `sync` manually between operations.
+
+### Signet Support
+
+The setup screen offers Regtest, Signet, and Mainnet network options.
+
+When Signet is selected, two additional fields appear:
+
+| Field | Description |
+|-------|-------------|
+| **Spark config path** | Path to a JSON file containing Spark operators and SSP configuration. Relative paths resolve against the app's documents directory. |
+| **Chain API URL** | Base URL for the REST chain service (e.g. `https://mempool.space/signet/api`). |
+
+When a Chain API URL is provided, a picker appears to choose between `esplora` (default) and
+`mempool-space` API types.
 
 ### Lightning Address Transfers
 
@@ -185,6 +199,15 @@ advanced unilateral-exit --fee-rate 2 --destination bc1q... --utxo txid:vout:val
 
 # Select specific leaves to exit
 advanced unilateral-exit --fee-rate 2 --destination bc1q... --leaf id1,id2
+
+# Write the signed exit to a file for later checking
+advanced unilateral-exit --fee-rate 2 --destination bc1q... --utxo txid:vout:value:pubkey --secret-key <hex> --output-file exit.json
+
+# Check a signed exit against the chain (which txs confirmed, what is ready)
+advanced check-unilateral-exit --input-file exit.json
+
+# Check and write the updated exit to a different file
+advanced check-unilateral-exit --input-file exit.json --output-file checked.json
 
 # Export exit state to a file (for safekeeping outside the wallet)
 advanced export-unilateral-exit-state --output-file exit-state.json

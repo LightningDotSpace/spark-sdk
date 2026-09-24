@@ -22,8 +22,8 @@ use crate::core::Network;
 use crate::operator::rpc as operator_rpc;
 use crate::operator::rpc::spark::PreimageRequestRole;
 use crate::signer::{
-    EncryptedSecret, FrostDerivation, FrostJob, FrostShareResult,
-    FrostSigningCommitmentsWithNonces, SignerError, SparkSigner,
+    FrostJob, FrostShareResult, FrostSigningCommitmentsWithNonces, LeafSigningKey, SignerError,
+    SparkSigner,
 };
 use crate::ssp::BitcoinNetwork;
 use crate::token::{HashableTokenTransaction, bech32m_encode_token_id};
@@ -138,6 +138,7 @@ impl TryFrom<&SignedTx> for operator_rpc::spark::UserSignedTxSigningJob {
 
     fn try_from(signed_tx: &SignedTx) -> Result<Self, Self::Error> {
         Ok(operator_rpc::spark::UserSignedTxSigningJob {
+            subuser_contributions: Vec::new(),
             leaf_id: signed_tx.node_id.to_string(),
             signing_public_key: signed_tx.signing_public_key.serialize().to_vec(),
             raw_tx: bitcoin::consensus::serialize(&signed_tx.tx),
@@ -327,12 +328,12 @@ fn to_jobs(
 
 /// Builds the [`RefundJob`] for one refund transaction: the FROST job plus the
 /// metadata that rebuilds its signed form. Pure client-side work: no signing.
-/// Refund signing always uses the leaf's own (derived) signing key, keyed by the
-/// leaf's node id. Signature aggregation happens later, when the returned share
-/// is combined with operator signatures.
+/// Signature aggregation happens later, when the returned share is combined with
+/// operator signatures.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_refund_signing_job(
     node_id: &TreeNodeId,
+    signing_key: &LeafSigningKey,
     verifying_key: &PublicKey,
     signing_public_key: &PublicKey,
     refund_tx: Transaction,
@@ -342,9 +343,7 @@ pub(crate) fn build_refund_signing_job(
     network: Network,
 ) -> RefundJob {
     let job = FrostJob {
-        derivation: FrostDerivation::SigningLeaf {
-            leaf_id: node_id.clone(),
-        },
+        derivation: signing_key.into(),
         sighash,
         verifying_key: *verifying_key,
         operator_commitments: operator_commitments.clone(),
@@ -360,7 +359,7 @@ pub(crate) fn build_refund_signing_job(
     RefundJob { job, pending }
 }
 
-pub(crate) struct SigningResult {
+pub struct SigningResult {
     pub signing_commitments: BTreeMap<Identifier, SigningCommitments>,
     pub signature_shares: BTreeMap<Identifier, SignatureShare>,
     pub public_keys: BTreeMap<Identifier, PublicKey>,
@@ -469,13 +468,11 @@ pub(crate) fn split_signing_commitments_by_variant<T>(
     Ok([cpfp, direct, direct_from_cpfp])
 }
 
+/// A leaf being sent, with the key it is held under.
 #[derive(Debug)]
 pub struct LeafKeyTweak {
     pub node: TreeNode,
-    /// For a claim, the incoming leaf key (ECIES-encrypted to our identity key
-    /// by the sender). `None` for outbound leaves, whose signing key is derived
-    /// from `node.id`.
-    pub incoming_key: Option<EncryptedSecret>,
+    pub signing_key: LeafSigningKey,
 }
 
 // TODO: verify if the optional times should be optional
@@ -649,14 +646,23 @@ impl TryFrom<operator_rpc::spark::TransferLeaf> for TransferLeaf {
                 )
             };
 
-        let signature = match leaf.signature.len() {
+        // The operators send the signature as raw bytes or as a typed signature;
+        // both carry the same DER or compact encoding.
+        let signature_bytes = match &leaf.sig {
+            Some(operator_rpc::spark::transfer_leaf::Sig::Signature(bytes)) => bytes.as_slice(),
+            Some(operator_rpc::spark::transfer_leaf::Sig::TypedSignature(typed)) => {
+                typed.signature.as_slice()
+            }
+            None => &[],
+        };
+        let signature = match signature_bytes.len() {
             0 => None,
             64 => Some(
-                bitcoin::secp256k1::ecdsa::Signature::from_compact(&leaf.signature)
+                bitcoin::secp256k1::ecdsa::Signature::from_compact(signature_bytes)
                     .map_err(|_| ServiceError::Generic("Invalid signature format".to_string()))?,
             ),
             _ => Some(
-                bitcoin::secp256k1::ecdsa::Signature::from_der(&leaf.signature)
+                bitcoin::secp256k1::ecdsa::Signature::from_der(signature_bytes)
                     .map_err(|_| ServiceError::Generic("Invalid signature format".to_string()))?,
             ),
         };
@@ -1638,13 +1644,15 @@ mod tests {
     use bitcoin::{Transaction, absolute::LockTime, transaction::Version};
     use frost_secp256k1_tr::Identifier;
     use macros::test_all;
+    use std::collections::BTreeMap;
 
-    use super::{ServiceError, convert_page};
+    use super::{ServiceError, build_refund_signing_job, convert_page};
     use crate::Network;
     use crate::operator::rpc as operator_rpc;
+    use crate::signer::{FrostDerivation, LeafSigningKey};
     use crate::token::TokenOutputWithPrevOut;
     use crate::token::bech32m_decode_token_id;
-    use crate::tree::TreeNode;
+    use crate::tree::{TreeNode, TreeNodeId};
 
     #[cfg(feature = "browser-tests")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -1698,6 +1706,45 @@ mod tests {
 
     fn create_proto_tree_node(owner_identity_public_key: Vec<u8>) -> operator_rpc::spark::TreeNode {
         create_proto_tree_node_full(owner_identity_public_key, TEST_PUBKEY_BYTES.to_vec())
+    }
+
+    /// A refund is signed with the key the leaf is held under, which need not
+    /// derive from the node id the operators know the leaf by.
+    #[test_all]
+    fn test_refund_signing_job_uses_the_key_the_leaf_is_held_under() {
+        let node = TreeNode::try_from(create_proto_tree_node(TEST_PUBKEY_BYTES.to_vec())).unwrap();
+        let held_under = TreeNodeId::generate();
+        let verifying_key = PublicKey::from_slice(&TEST_PUBKEY_BYTES).unwrap();
+
+        let job = build_refund_signing_job(
+            &node.id,
+            &LeafSigningKey {
+                derived_from: held_under.clone(),
+            },
+            &verifying_key,
+            &verifying_key,
+            Transaction {
+                version: Version::non_standard(3),
+                lock_time: LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            },
+            [0u8; 32],
+            BTreeMap::new(),
+            None,
+            Network::Regtest,
+        );
+
+        assert_eq!(
+            job.job.derivation,
+            FrostDerivation::SigningLeaf {
+                leaf_id: held_under
+            }
+        );
+        assert_eq!(
+            job.pending.node_id, node.id,
+            "the operator-facing node id must not move with the key"
+        );
     }
 
     #[test_all]

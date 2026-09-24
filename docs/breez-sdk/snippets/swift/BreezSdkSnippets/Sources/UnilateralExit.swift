@@ -46,6 +46,32 @@ func buildExit(sdk: BreezSdk, quote: PrepareUnilateralExitResponse) async throws
     // ANCHOR_END: unilateral-exit
 }
 
+func checkExit(sdk: BreezSdk, stored: UnilateralExitResponse) async throws {
+    // ANCHOR: check-unilateral-exit
+    let checked = try await sdk.checkUnilateralExit(
+        request: CheckUnilateralExitRequest(exit: stored)
+    )
+
+    // Store this one in place of the one you had.
+    let exit = checked.exit
+
+    switch checked.verdict {
+    case .valid:
+        for tx in exit.transactions {
+            if case .ready = tx.status {
+                print("ready to broadcast: \(tx.txid)")
+            }
+        }
+    case .done:
+        print("The exit finished: \(exit.recoverableValueSat) sats recovered")
+    case .redo(let reason):
+        // Quote and build again, naming the same leaves. Pass exit.fundingInputs
+        // back and the SDK follows them to whatever they have become.
+        print("Build the exit again: \(reason)")
+    }
+    // ANCHOR_END: check-unilateral-exit
+}
+
 func exportExitState(sdk: BreezSdk) async throws -> String {
     // ANCHOR: export-unilateral-exit-state
     let exported = try await sdk.exportUnilateralExitState()
@@ -65,6 +91,16 @@ func importExitState(sdk: BreezSdk, exitState: String) async throws {
 
     print("Imported \(imported.importedLeaves) leaves, skipped \(imported.skippedForeignLeaves)")
     // ANCHOR_END: import-unilateral-exit-state
+}
+
+func syncExitData(sdk: BreezSdk) async throws {
+    // ANCHOR: sync-exit-data
+    // With automatic collection off, an explicit sync is what collects the data
+    // a unilateral exit needs, and it waits for the collection to finish. Needs
+    // the Spark operators reachable, so run it on a schedule rather than at the
+    // moment an exit is needed.
+    let _ = try await sdk.syncWallet(request: SyncWalletRequest())
+    // ANCHOR_END: sync-exit-data
 }
 
 // ANCHOR: custom-cpfp-signer

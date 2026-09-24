@@ -49,7 +49,10 @@ function parseCpfpInput(s, kind) {
  */
 function printExitTransactions(response) {
   console.log(
-    `Recoverable ${response.recoverableValueSat} sats, total fee ${response.totalFeeSat} sats, ${response.transactions.length} transaction(s):`
+    `Recoverable ${response.recoverableValueSat} sats, ` +
+    `total fee ${response.totalFeeSat} sats ` +
+    `(cpfp ${response.cpfpFeeSat}, fanout ${response.fanoutFeeSat}, sweep ${response.sweepFeeSat}), ` +
+    `${response.transactions.length} transaction(s):`
   )
   for (let i = 0; i < response.transactions.length; i++) {
     const tx = response.transactions[i]
@@ -59,10 +62,24 @@ function printExitTransactions(response) {
     const csv = tx.csvTimelockBlocks != null
       ? `, csv ${tx.csvTimelockBlocks} blocks`
       : ''
-    console.log(`  [${i}] ${tx.kind} status=${tx.status} txid=${tx.txid}${after}${csv}`)
-    if (tx.status === 'confirmed') {
-      console.log('      (already confirmed, nothing to broadcast)')
+    console.log(`  [${i}] ${tx.kind} status=${JSON.stringify(tx.status)} txid=${tx.txid}${after}${csv}`)
+    if (tx.status.type === 'confirmed') {
+      if (tx.status.blockHeight != null) {
+        console.log(`      (confirmed in block ${tx.status.blockHeight}, nothing to broadcast)`)
+      } else {
+        console.log('      (already confirmed, nothing to broadcast)')
+      }
       continue
+    }
+    if (tx.status.type === 'waitingForDependencies') {
+      console.log('      (waiting on the transactions it depends on)')
+    }
+    if (tx.status.type === 'waitingForTimelock') {
+      if (tx.status.spendableAtHeight != null) {
+        console.log(`      (waiting for its timelock, until block ${tx.status.spendableAtHeight})`)
+      } else {
+        console.log('      (waiting for its timelock)')
+      }
     }
     const pkg = tx.cpfpTxHex
       ? `${tx.txHex},${tx.cpfpTxHex}`
@@ -91,6 +108,7 @@ function registerAdvancedCommands(program, getSdk, rl) {
     .option('--funding-kind <kind>', 'Funding UTXO kind (p2wpkh or p2tr)', 'p2tr')
     .requiredOption('--destination <address>', 'Destination address for the swept funds')
     .option('--leaf <ids...>', 'Leaf id(s) to exit (omit to auto-select every profitable leaf)')
+    .option('--output-file <path>', 'File to write the signed exit to, for check-unilateral-exit to read back')
     .action(async (options) => {
       const sdk = getSdk()
 
@@ -137,6 +155,27 @@ function registerAdvancedCommands(program, getSdk, rl) {
         signer
       )
       printExitTransactions(response)
+      if (options.outputFile) {
+        writeExit(options.outputFile, response)
+      }
+    })
+
+  // --- check-unilateral-exit ---
+  advanced
+    .command('check-unilateral-exit')
+    .description('Read a signed exit back against the chain: which transactions confirmed, what is ready to broadcast now, and whether the exit still holds')
+    .requiredOption('--input-file <path>', 'File the exit was written to')
+    .option('--output-file <path>', 'File to write the updated exit to (defaults to --input-file)')
+    .action(async (options) => {
+      const sdk = getSdk()
+      const exit = readExit(options.inputFile)
+      const checked = await sdk.checkUnilateralExit({ exit })
+      console.log(`Verdict: ${JSON.stringify(checked.verdict)}`)
+      if (checked.verdict.type === 'redo') {
+        console.log('  (this exit cannot be finished, quote and build it again)')
+      }
+      printExitTransactions(checked.exit)
+      writeExit(options.outputFile || options.inputFile, checked.exit)
     })
 
   // --- export-unilateral-exit-state ---
@@ -167,6 +206,15 @@ function registerAdvancedCommands(program, getSdk, rl) {
         `left out the exit data of ${imported.skippedChains} leaf(s)`
       )
     })
+}
+
+function readExit(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+}
+
+function writeExit(filePath, exit) {
+  fs.writeFileSync(filePath, JSON.stringify(exit, null, 2))
+  console.log(`Wrote the exit to ${filePath}`)
 }
 
 module.exports = { registerAdvancedCommands }
