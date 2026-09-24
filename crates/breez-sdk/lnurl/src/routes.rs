@@ -52,8 +52,11 @@ const DEFAULT_METADATA_OFFSET: u32 = 0;
 const DEFAULT_METADATA_LIMIT: u32 = 100;
 /// Maximum size (bytes) of a nostr event JSON (zap request or zap receipt).
 const MAX_NOSTR_EVENT_SIZE: usize = 32_768;
-/// Maximum length of a sender comment (LUD-12).
+/// Maximum length of a sender comment, in characters (LUD-12).
 const MAX_COMMENT_LENGTH: usize = 255;
+/// How long the readiness probe waits for the database. Well under the pool's
+/// own wait timeout, so a hung database fails the probe instead of stalling it.
+const READY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Where `list_metadata` reads its credential from, in preference to the query
 /// string. A GET's query string lands in proxy and access logs; the response
 /// carries preimages.
@@ -671,7 +674,7 @@ where
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty());
-        if comment.is_some_and(|c| c.len() > MAX_COMMENT_LENGTH) {
+        if comment.is_some_and(|c| c.chars().count() > MAX_COMMENT_LENGTH) {
             return Err(lnurl_error("comment too long"));
         }
 
@@ -809,6 +812,21 @@ where
             "routes": Vec::<String>::new(),
             "verify": verify_url,
         })))
+    }
+
+    /// Readiness probe: 200 while the database answers, 503 otherwise.
+    pub async fn ready(Extension(state): Extension<State<DB>>) -> StatusCode {
+        match tokio::time::timeout(READY_TIMEOUT, state.db.ping()).await {
+            Ok(Ok(())) => StatusCode::OK,
+            Ok(Err(e)) => {
+                warn!("readiness check failed: {e}");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Err(_) => {
+                warn!("readiness check timed out");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        }
     }
 
     /// LUD-21 verify endpoint
@@ -2043,10 +2061,23 @@ mod tests {
         invoices: std::sync::Arc<Mutex<HashMap<String, Invoice>>>,
         pending_zap_receipts: std::sync::Arc<Mutex<HashMap<String, PendingZapReceipt>>>,
         claimed_messages: ClaimedMessages,
+        unreachable: bool,
+        hangs: bool,
     }
 
     #[async_trait::async_trait]
     impl LnurlRepository for MockRepository {
+        async fn ping(&self) -> Result<(), LnurlRepositoryError> {
+            if self.hangs {
+                std::future::pending::<()>().await;
+            }
+            if self.unreachable {
+                return Err(LnurlRepositoryError::General(anyhow::anyhow!(
+                    "database unreachable"
+                )));
+            }
+            Ok(())
+        }
         async fn delete_user(
             &self,
             _: &str,
@@ -2529,6 +2560,56 @@ mod tests {
     // -- Tests -----------------------------------------------------------------
 
     #[tokio::test]
+    async fn ready_is_ok_while_the_database_answers() {
+        let state = handler_state(
+            MockRepository::default(),
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_is_unavailable_while_the_database_errors() {
+        let repo = MockRepository {
+            unreachable: true,
+            ..MockRepository::default()
+        };
+        let state = handler_state(
+            repo,
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn ready_is_unavailable_while_the_database_hangs() {
+        let repo = MockRepository {
+            hangs: true,
+            ..MockRepository::default()
+        };
+        let state = handler_state(
+            repo,
+            false,
+            std::sync::Arc::new(CountingSspClient::default()),
+        )
+        .await;
+
+        let status = LnurlServer::<MockRepository>::ready(Extension(state)).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn invoice_rejects_an_overlong_comment_before_requesting_an_invoice() {
         let ssp = std::sync::Arc::new(CountingSspClient::default());
         let state = handler_state(repo_with_user(), false, ssp.clone()).await;
@@ -2552,6 +2633,34 @@ mod tests {
 
         assert_eq!(body["reason"], "failed to create invoice");
         assert!(ssp.requests() > 0, "an invoice must be requested");
+    }
+
+    #[tokio::test]
+    async fn invoice_counts_the_comment_limit_in_characters() {
+        // 4 bytes per character: a byte count would refuse this at a quarter
+        // of the advertised `commentAllowed`.
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("😀".repeat(MAX_COMMENT_LENGTH)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "failed to create invoice");
+        assert!(ssp.requests() > 0, "an invoice must be requested");
+    }
+
+    #[tokio::test]
+    async fn invoice_rejects_a_multibyte_comment_one_character_over_the_limit() {
+        let ssp = std::sync::Arc::new(CountingSspClient::default());
+        let state = handler_state(repo_with_user(), false, ssp.clone()).await;
+
+        let (_, Json(body)) = request_invoice(state, Some("ü".repeat(MAX_COMMENT_LENGTH + 1)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(body["reason"], "comment too long");
+        assert_eq!(ssp.requests(), 0, "no invoice may be requested");
     }
 
     #[tokio::test]

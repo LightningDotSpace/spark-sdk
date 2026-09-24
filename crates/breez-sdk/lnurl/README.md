@@ -170,6 +170,8 @@ The LNURL server provides the following endpoints:
 - `/.well-known/lnurlp/{username}` - LNURL-pay endpoint for Lightning Address handling
 - `/lnurlp/{username}` - Alternative LNURL-pay endpoint 
 - `/lnurlp/{username}/invoice` - Invoice generation endpoint for LNURL-pay
+- `/health` - Liveness: answers 200 while the process serves requests
+- `/ready` - Readiness: 200 while the database answers, 503 otherwise. Point container healthchecks here
 
 ### Authenticated Endpoints (require API key)
 

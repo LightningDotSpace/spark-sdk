@@ -236,6 +236,12 @@ fn now_secs_i32() -> i32 {
 
 #[async_trait::async_trait]
 impl crate::repository::LnurlRepository for LnurlRepository {
+    async fn ping(&self) -> Result<(), LnurlRepositoryError> {
+        let client = self.pool.get().await?;
+        client.simple_query("SELECT 1").await?;
+        Ok(())
+    }
+
     async fn delete_user(
         &self,
         domain: &str,
@@ -1167,6 +1173,7 @@ impl crate::webhooks::WebhookRepository for LnurlRepository {
 mod postgres_tests {
     use spark_postgres::deadpool_postgres::Pool;
 
+    use crate::repository::LnurlRepository as _;
     use crate::repository::shared_tests;
     use crate::test_support::test_pool;
 
@@ -1185,6 +1192,16 @@ mod postgres_tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ping_follows_the_database() {
+        let (pg, pool) = test_pool().await;
+        let db = super::LnurlRepository::new(pool);
+        assert!(db.ping().await.is_ok());
+
+        pg.stop().await.expect("stop postgres");
+        assert!(db.ping().await.is_err());
     }
 
     #[tokio::test]

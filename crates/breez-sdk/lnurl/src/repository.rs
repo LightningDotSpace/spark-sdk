@@ -153,6 +153,8 @@ pub struct TransferRequest<'a> {
 
 #[async_trait::async_trait]
 pub trait LnurlRepository {
+    /// Run a trivial query, to tell whether the database is reachable.
+    async fn ping(&self) -> Result<(), LnurlRepositoryError>;
     /// Delete `pubkey`'s row in `domain`, but only while it still holds `name`,
     /// and hold `name` for it. Returns whether a row was removed.
     ///

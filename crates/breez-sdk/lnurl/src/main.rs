@@ -561,6 +561,7 @@ where
         .route("/verify/{payment_hash}", get(LnurlServer::<DB>::verify))
         .route("/webhook", post(LnurlServer::<DB>::webhook))
         .route("/health", get(|| async { StatusCode::OK }))
+        .route("/ready", get(LnurlServer::<DB>::ready))
         .layer(Extension(state))
         .layer(
             CorsLayer::new()
@@ -573,11 +574,7 @@ where
     let listener = tokio::net::TcpListener::bind(args.address).await?;
     let server = axum::serve(listener, server_router.into_make_service());
 
-    let graceful = server.with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to create Ctrl+C shutdown signal");
-    });
+    let graceful = server.with_graceful_shutdown(shutdown_signal());
 
     // Await the server to receive the shutdown signal
     if let Err(e) = graceful.await {
@@ -586,6 +583,30 @@ where
 
     info!("lnurl server stopped");
     Ok(())
+}
+
+/// Resolves on Ctrl+C or, on unix, SIGTERM (what `docker stop` sends).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to create Ctrl+C shutdown signal");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to create SIGTERM shutdown signal")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }
 
 fn register_webhook(service_provider: Arc<ServiceProvider>, webhook_url: String, secret: String) {
